@@ -86,7 +86,7 @@ import {
   workflowOpeningParentThreadId,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
-  deriveThreadQueueWorkflowState,
+  getUserQueuedThreadRuns,
   threadSupportsProviderHandoff,
 } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
@@ -2947,9 +2947,7 @@ export default function ChatView(props: ChatViewProps) {
     backgroundWorkNow !== null ||
     goalNow !== null ||
     shownThreadSyncPhase !== null;
-  const queuedRunCount = serverProjection
-    ? deriveThreadQueueWorkflowState(serverProjection).queuedRuns.length
-    : 0;
+  const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
   // The queue control is mounted for every server thread; it only belongs in the footer, and keeps
   // the empty-thread placeholder away, while something is queued.
   const hasQueuedTurns =

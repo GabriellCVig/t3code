@@ -269,6 +269,8 @@ export function QueuedRunsControl({
             <li
               key={item.key}
               aria-label={`Queued message ${position + 1} of ${items.length}, not sent`}
+              aria-posinset={position + 1}
+              aria-setsize={items.length}
               aria-current={isEditing ? "true" : undefined}
               className={cn(
                 "group/queued relative flex w-full flex-col items-end gap-1 transition-opacity duration-150 ease-out starting:opacity-0 motion-reduce:transition-none",
@@ -352,20 +354,14 @@ export function QueuedRunsControl({
                     ))}
                   </span>
                 ) : null}
+                {/* In full, like a sent turn: a queued message is read before it is sent. */}
                 {previewText ? (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={<p className="line-clamp-3 whitespace-pre-wrap wrap-anywhere" />}
-                    >
-                      {item.guestName === undefined ? null : (
-                        <span className="text-guest-foreground">{item.guestName} </span>
-                      )}
-                      {previewText}
-                    </TooltipTrigger>
-                    <TooltipPopup side="top" className="max-w-96 break-words">
-                      {previewText}
-                    </TooltipPopup>
-                  </Tooltip>
+                  <p className="whitespace-pre-wrap wrap-anywhere">
+                    {item.guestName === undefined ? null : (
+                      <span className="text-guest-foreground">{item.guestName} </span>
+                    )}
+                    {previewText}
+                  </p>
                 ) : null}
               </div>
               <div className="flex items-center gap-0.5 pe-1 text-xs text-muted-foreground">
@@ -495,15 +491,23 @@ export function QueuedRunsControl({
         })}
       </ol>
       {collapsible ? (
-        <div className="self-end pe-1 text-xs">
+        <div className="self-end pe-1 text-xs pointer-coarse:[&_[data-slot=inline-button]]:relative pointer-coarse:[&_[data-slot=inline-button]]:after:absolute pointer-coarse:[&_[data-slot=inline-button]]:after:-inset-x-1.5 pointer-coarse:[&_[data-slot=inline-button]]:after:-inset-y-3.5">
           <InlineButton
             tone="muted"
             aria-expanded={showAll}
             aria-controls={queueListId}
+            // Keep the composer focused; keyboard activation still works.
+            onPointerDown={(event) => event.preventDefault()}
             onClick={() => setShowAll((value) => !value)}
           >
             {showAll ? "Show fewer" : `Show all ${items.length} queued`}
-            <ChevronDownIcon aria-hidden className={cn("size-3.5", showAll && "rotate-180")} />
+            <ChevronDownIcon
+              aria-hidden
+              className={cn(
+                "size-3.5 transition-transform duration-150 motion-reduce:transition-none",
+                showAll && "rotate-180",
+              )}
+            />
           </InlineButton>
         </div>
       ) : null}
