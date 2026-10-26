@@ -16,9 +16,7 @@ it("puts machine notices first, whatever order the notices arrive in", async () 
     <ComposerBannerStack items={[notice("Branch changed"), notice("Offline", "environment")]} />,
   );
 
-  expect(screen.getByRole("region", { name: "Notices" }).element().textContent).toBe(
-    "OfflineBranch changed",
-  );
+  expect(screen.container.textContent).toBe("OfflineBranch changed");
 });
 
 it("leaves the next attachment its own top edge when there are no notices", async () => {

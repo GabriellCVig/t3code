@@ -1,7 +1,6 @@
 import { InfoIcon } from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ComposerBanner, type ComposerBannerVariant } from "./ComposerBanner";
@@ -28,43 +27,26 @@ export interface ComposerBannerStackItem {
 
 const GROUPS = ["environment", "attention"] as const;
 
-/** Notices about sending from this composer, on one attached surface. */
+/**
+ * Notices about sending from this composer, each its own attached card. Consecutive cards join
+ * edge to edge, and the last joins the composer or the drawer below it.
+ */
 export function ComposerBannerStack({
   items,
 }: {
   readonly items: ReadonlyArray<ComposerBannerStackItem>;
 }) {
-  const bands = GROUPS.map((group) =>
+  return GROUPS.flatMap((group) =>
     items.filter((item) => (item.group ?? "attention") === group),
-  ).filter((band) => band.length > 0);
-  if (bands.length === 0) return null;
-  return (
-    <ComposerBanner.Attachment data-composer-banner-stack="true">
-      <ComposerBanner.Root
-        role="region"
-        aria-label="Notices"
-        density="comfortable"
-        data-chat-composer-collapsed-controls="true"
-        className={cn(
-          "[&>[data-composer-shelf-band]+[data-composer-shelf-band]]:border-t",
-          // The first row's corner button nests inside the shelf's top-right radius.
-          "[&>[data-composer-shelf-band]:first-child>[data-composer-shelf-row]:first-child>[data-composer-banner-row]>[data-slot=composer-banner-actions]>[data-slot=button]:last-child]:rounded-se-xl",
-        )}
-      >
-        {bands.map((band) => (
-          <div
-            key={band[0]!.group ?? "attention"}
-            data-composer-shelf-band="true"
-            className="-mx-1 border-(--chat-composer-attached-outline) px-1 py-0.5 *:transition-opacity *:duration-150 *:ease-out *:starting:opacity-0 motion-reduce:*:transition-none"
-          >
-            {band.map((item) => (
-              <ShelfRow key={item.id} item={item} />
-            ))}
-          </div>
-        ))}
-      </ComposerBanner.Root>
+  ).map((item) => (
+    <ComposerBanner.Attachment
+      key={item.id}
+      data-composer-banner-stack="true"
+      className="transition-opacity duration-150 ease-out starting:opacity-0 motion-reduce:transition-none"
+    >
+      <NoticeCard item={item} />
     </ComposerBanner.Attachment>
-  );
+  ));
 }
 
 export function NoticeText({
@@ -142,19 +124,13 @@ export function NoticeText({
   );
 }
 
-function ShelfRow({ item }: { readonly item: ComposerBannerStackItem }) {
-  const problem = item.variant === "error" || item.variant === "warning";
+function NoticeCard({ item }: { readonly item: ComposerBannerStackItem }) {
   return (
-    <div
-      role={problem ? "alert" : undefined}
-      data-composer-shelf-row={item.variant}
-      className={cn(
-        problem && "rounded-xl",
-        item.variant === "error" &&
-          "bg-destructive/8 [&>[data-composer-banner-row]>[data-slot=composer-banner-icon]]:text-destructive-foreground",
-        item.variant === "warning" &&
-          "bg-warning/8 [&>[data-composer-banner-row]>[data-slot=composer-banner-icon]]:text-warning-foreground",
-      )}
+    <ComposerBanner.Root
+      role={item.variant === "error" || item.variant === "warning" ? "alert" : undefined}
+      variant={item.variant}
+      density="comfortable"
+      data-chat-composer-collapsed-controls="true"
     >
       <ComposerBanner.Row layout="wrap-actions">
         <ComposerBanner.Icon className="h-(--composer-banner-icon-column) self-start">
@@ -178,11 +154,7 @@ function ShelfRow({ item }: { readonly item: ComposerBannerStackItem }) {
                   ? `Show details: ${item.title}`
                   : "Show notice details"
               }
-              className={cn(
-                "w-0 min-w-0 grow truncate @max-[400px]:sr-only",
-                // Muted text falls under 4.5:1 on the light problem tints.
-                problem ? "text-foreground/65" : "text-muted-foreground",
-              )}
+              className="w-0 min-w-0 grow truncate text-muted-foreground @max-[400px]:sr-only"
             >
               {item.description}
             </NoticeText>
@@ -201,6 +173,6 @@ function ShelfRow({ item }: { readonly item: ComposerBannerStackItem }) {
         ) : null}
       </ComposerBanner.Row>
       {item.children ? <ComposerBanner.Children>{item.children}</ComposerBanner.Children> : null}
-    </div>
+    </ComposerBanner.Root>
   );
 }
