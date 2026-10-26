@@ -299,4 +299,89 @@ describe("Antigravity subscription limits", () => {
       }
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect(
+    "reads subscription limits directly from agy --output-format json --print=/quota when acp_token.json is absent",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const profileDirectory = yield* fs.makeTempDirectoryScoped();
+        const fakeAgy = path.join(profileDirectory, "agy");
+        yield* fs.writeFileString(
+          fakeAgy,
+          [
+            "#!/bin/sh",
+            `printf '\\r⠋ Fetching quota...\\r%s\\n' '${JSON.stringify({
+              status: "SUCCESS",
+              command: {
+                name: "usage",
+                data: {
+                  groups: [
+                    {
+                      name: "Gemini Models",
+                      buckets: [
+                        {
+                          id: "gemini-weekly",
+                          name: "Weekly Limit Remaining",
+                          window: "weekly",
+                          remaining_fraction: 0.25,
+                          reset_time: "2026-10-30T22:02:08Z",
+                        },
+                        {
+                          id: "gemini-5h",
+                          name: "Five Hour Limit Remaining",
+                          window: "5h",
+                          remaining_fraction: 0.5,
+                          reset_time: "2026-10-26T21:17:04Z",
+                        },
+                      ],
+                    },
+                    {
+                      name: "Claude and GPT models",
+                      buckets: [
+                        {
+                          id: "3p-weekly",
+                          name: "Weekly Limit Remaining",
+                          window: "weekly",
+                          remaining_fraction: 0.1,
+                          reset_time: "2026-10-28T20:23:59Z",
+                        },
+                        {
+                          id: "3p-5h",
+                          name: "Five Hour Limit Remaining",
+                          window: "5h",
+                          remaining_fraction: 1,
+                          reset_time: "2026-10-27T01:12:39Z",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            })}'`,
+            "",
+          ].join("\n"),
+        );
+        yield* fs.chmod(fakeAgy, 0o755);
+        const usage = yield* makeAntigravityUsageProbe({
+          profileDirectory,
+          authMethod: "oauth-personal",
+          resolveCliCommand: Effect.succeed({ executablePath: fakeAgy }),
+        }).pipe(
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("unexpected network call")),
+          ),
+        );
+        const limits = yield* usage.probe;
+        expect(limits.unavailable).toBeUndefined();
+        expect(limits.windows).toHaveLength(4);
+        const byId = new Map(limits.windows.map((window) => [window.id, window]));
+        expect(byId.get("gemini-weekly")?.usedPercent).toBeCloseTo(75);
+        expect(byId.get("gemini-5h")?.usedPercent).toBeCloseTo(50);
+        expect(byId.get("3p-weekly")?.usedPercent).toBeCloseTo(90);
+        expect(byId.get("3p-5h")?.usedPercent).toBeCloseTo(0);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });

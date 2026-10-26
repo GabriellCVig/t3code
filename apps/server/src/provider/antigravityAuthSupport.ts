@@ -80,6 +80,7 @@ const removedEnvironmentKeys = new Set([
 
 export interface AntigravityProfile {
   readonly platform: NodeJS.Platform;
+  readonly userHome?: string;
   readonly geminiHome: string;
   readonly acpDirectory: string;
   readonly tokenPath: string;
@@ -195,38 +196,35 @@ function antigravityEnvironment(
   profile: AntigravityProfile,
   baseEnv: NodeJS.ProcessEnv,
   auth: AntigravityAuthConfig,
-  runtimeTempDirectory?: string,
+  _runtimeTempDirectory?: string,
 ) {
   const environment: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     // Windows treats environment keys as case-insensitive. Remove aliases too.
     if (!removedEnvironmentKeys.has(key.toUpperCase())) environment[key] = value;
   }
-  // Put the GCP pair in settings.json because GOOGLE_API_KEY takes precedence in the environment.
   const credential =
     auth.authMethod === "gemini-api-key" && auth.apiKey
       ? { GEMINI_API_KEY: auth.apiKey }
       : auth.authMethod === "agent-platform" && auth.apiKey
         ? { GOOGLE_API_KEY: auth.apiKey }
         : {};
-  // Each launch unpacks about 1 GB; use T3-owned temp so the driver can reclaim files after force-kill.
-  const tempDirectory = runtimeTempDirectory ?? profile.tempDirectory;
+  const resolvedHome = profile.userHome ?? baseEnv.HOME ?? process.env.HOME;
   return {
     ...environment,
+    ...(resolvedHome
+      ? profile.platform === "win32"
+        ? { USERPROFILE: resolvedHome, HOME: resolvedHome }
+        : { HOME: resolvedHome }
+      : {}),
     ...credential,
     ...(profile.caBundlePath !== undefined &&
     baseEnv.SSL_CERT_FILE === undefined &&
     baseEnv.SSL_CERT_DIR === undefined
       ? { SSL_CERT_FILE: profile.caBundlePath }
       : {}),
-    GEMINI_HOME: profile.geminiHome,
-    AGY_ACP_FORCE_FILE_STORAGE: "1",
+    T3_ANTIGRAVITY_PROFILE_DIR: profile.geminiHome,
     BROWSER: profile.browserCommand,
-    PYTHONUNBUFFERED: "1",
-    ELECTRON_RUN_AS_NODE: "1",
-    ...(profile.platform === "win32"
-      ? { TEMP: tempDirectory, TMP: tempDirectory }
-      : { TMPDIR: tempDirectory }),
   };
 }
 
@@ -343,6 +341,7 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
   }
   const profile: AntigravityProfile = {
     platform,
+    userHome,
     geminiHome,
     acpDirectory,
     tokenPath: path.join(acpDirectory, "acp_token.json"),
@@ -432,7 +431,7 @@ export function buildAntigravityAcpSpawnInput(input: {
 }): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: input.installation.executablePath,
-    args: input.profile.platform === "linux" ? ["--uid="] : [],
+    args: [],
     cwd: input.cwd,
     env: {
       ...antigravityEnvironment(
@@ -441,9 +440,8 @@ export function buildAntigravityAcpSpawnInput(input: {
         input.auth ?? ANTIGRAVITY_PERSONAL_AUTH,
         input.runtimeTempDirectory,
       ),
-      ANTIGRAVITY_HARNESS_PATH: input.installation.harnessPath,
     },
-    extendEnv: false,
+    extendEnv: true,
   };
 }
 

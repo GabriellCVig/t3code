@@ -125,6 +125,13 @@ interface AntigravityProviderOptions {
   >;
   readonly supportsTextGeneration: Effect.Effect<boolean>;
   readonly probeUsage?: Effect.Effect<ServerProviderUsageLimits>;
+  readonly probeCatalog?: Effect.Effect<
+    | {
+        readonly setup: SessionSetupResult;
+        readonly slashCommands?: ReadonlyArray<EffectAcpSchema.AvailableCommand>;
+      }
+    | undefined
+  >;
   readonly clearUsage?: Effect.Effect<void>;
   readonly maintenanceCapabilities?: ProviderMaintenanceCapabilities;
   readonly auth?: { readonly type: string; readonly label: string };
@@ -192,22 +199,49 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
       initialized !== undefined ? yield* options.supportsTextGeneration : false;
     const usageLimits =
       initialized !== undefined && options.probeUsage ? yield* options.probeUsage : undefined;
+    const probedCatalog =
+      initialized !== undefined && options.probeCatalog ? yield* options.probeCatalog : undefined;
     const updatedAt = DateTime.formatIso(yield* DateTime.now);
     const next = yield* SubscriptionRef.updateAndGet(metadata, (state) => {
       if (state.authRevision !== before.authRevision) return state;
       const { message: _previousMessage, ...draft } = state.draft;
-      const authenticated = draft.auth.status === "authenticated";
+      const catalogAuthenticated =
+        probedCatalog !== undefined ||
+        (options.probeCatalog !== undefined &&
+          usageLimits !== undefined &&
+          usageLimits.unavailable === undefined &&
+          usageLimits.windows.length > 0);
+      const nextAuth =
+        draft.auth.status === "unknown" && catalogAuthenticated
+          ? {
+              status: "authenticated" as const,
+              type: options.auth?.type ?? "oauth-personal",
+              label: options.auth?.label ?? "Google account",
+            }
+          : draft.auth;
+      const authenticated = nextAuth.status === "authenticated";
+      const nextModels =
+        probedCatalog && draft.models.length === 0
+          ? buildAntigravityModelsFromSession(probedCatalog.setup)
+          : draft.models;
+      const nextSlashCommands =
+        probedCatalog?.slashCommands && draft.slashCommands.length === 0
+          ? nativeCommands(probedCatalog.slashCommands)
+          : draft.slashCommands;
       const message =
         errorMessage ??
         (authenticated
           ? undefined
-          : draft.auth.status === "unauthenticated"
+          : nextAuth.status === "unauthenticated"
             ? SIGN_IN_MESSAGE
             : AUTH_UNCHECKED_MESSAGE);
       return {
         ...state,
         draft: {
           ...draft,
+          auth: nextAuth,
+          models: nextModels,
+          slashCommands: nextSlashCommands,
           installed: !missingInstallation,
           // Lightweight custom-launcher probes lack versions; preserve the real handshake's version.
           version: version === "unknown" ? draft.version : version || draft.version,
@@ -231,7 +265,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           ...(initialized !== undefined
             ? {
                 supportsTextGeneration:
-                  supportsTextGeneration && draft.auth.status !== "unauthenticated",
+                  supportsTextGeneration && nextAuth.status !== "unauthenticated",
               }
             : {}),
           ...(message ? { message } : {}),

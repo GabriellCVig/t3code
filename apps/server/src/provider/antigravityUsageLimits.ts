@@ -1,3 +1,5 @@
+import * as NodeChildProcess from "node:child_process";
+
 import type { AntigravitySettings, ServerProviderUsageWindow } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
@@ -69,6 +71,96 @@ const decodeTokenResponse = Schema.decodeUnknownEffect(TokenResponse);
 const decodeUserInfo = Schema.decodeUnknownEffect(UserInfo);
 const decodeSummary = Schema.decodeUnknownEffect(Summary);
 const decodeModels = Schema.decodeUnknownEffect(Models);
+
+const AgyQuotaBucket = Schema.Struct({
+  id: Schema.NonEmptyString,
+  name: Schema.optional(Schema.String),
+  window: Schema.optional(Schema.String),
+  remaining_fraction: Schema.optional(Schema.Number),
+  reset_time: Schema.optional(Schema.String),
+  disabled: Schema.optional(Schema.Boolean),
+});
+
+const AgyQuotaResponse = Schema.Struct({
+  status: Schema.optional(Schema.String),
+  command: Schema.optional(
+    Schema.Struct({
+      name: Schema.optional(Schema.String),
+      data: Schema.optional(
+        Schema.Struct({
+          groups: Schema.optional(
+            Schema.Array(
+              Schema.Struct({
+                name: Schema.optional(Schema.String),
+                buckets: Schema.optional(Schema.Array(AgyQuotaBucket)),
+              }),
+            ),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+const decodeAgyQuotaResponse = Schema.decodeUnknownEffect(AgyQuotaResponse);
+
+function extractTrailingJson(raw: string): unknown {
+  const trimmed = raw.trim();
+  for (let idx = trimmed.lastIndexOf("{"); idx >= 0; idx = trimmed.lastIndexOf("{", idx - 1)) {
+    const candidate = trimmed.slice(idx);
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Keep scanning backwards for the outermost JSON object.
+    }
+  }
+  return undefined;
+}
+
+function agyQuotaToSummary(response: typeof AgyQuotaResponse.Type): typeof Summary.Type {
+  return {
+    groups: response.command?.data?.groups?.map((group) => ({
+      ...(group.name ? { displayName: group.name } : {}),
+      buckets: group.buckets?.map((bucket) => ({
+        bucketId: bucket.id,
+        ...(bucket.name ? { displayName: bucket.name } : {}),
+        ...(bucket.window ? { window: bucket.window } : {}),
+        ...(bucket.remaining_fraction !== undefined
+          ? { remainingFraction: bucket.remaining_fraction }
+          : {}),
+        ...(bucket.reset_time ? { resetTime: bucket.reset_time } : {}),
+        ...(bucket.disabled !== undefined ? { disabled: bucket.disabled } : {}),
+      })),
+    })),
+  };
+}
+
+function runAgyQuotaCommand(input: {
+  readonly executablePath: string;
+  readonly env?: NodeJS.ProcessEnv;
+}): Effect.Effect<string, Error> {
+  return Effect.callback<string, Error>((resume) => {
+    const child = NodeChildProcess.execFile(
+      input.executablePath,
+      ["--output-format", "json", "--print=/quota"],
+      {
+        env: { ...process.env, ...input.env },
+        timeout: 25_000,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (error && !stdout.trim()) {
+          resume(Effect.fail(new Error(stderr.trim() || error.message)));
+          return;
+        }
+        resume(Effect.succeed(stdout));
+      },
+    );
+    return Effect.sync(() => {
+      child.kill();
+    });
+  });
+}
 
 function iso(value: string | undefined): string | undefined {
   const parsed = value ? DateTime.make(value) : Option.none();
@@ -160,6 +252,10 @@ function modelWindows(models: typeof Models.Type) {
 export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (input: {
   readonly profileDirectory: string;
   readonly authMethod: AntigravitySettings["authMethod"];
+  readonly resolveCliCommand?: Effect.Effect<
+    { readonly executablePath: string; readonly env?: NodeJS.ProcessEnv },
+    unknown
+  >;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -197,6 +293,26 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     }
     if (!(yield* fs.exists(tokenPath))) {
       cached = undefined;
+      if (input.resolveCliCommand) {
+        const cliCommand = yield* input.resolveCliCommand.pipe(Effect.option);
+        if (Option.isSome(cliCommand)) {
+          const rawOutput = yield* runAgyQuotaCommand(cliCommand.value);
+          const parsed = extractTrailingJson(rawOutput);
+          const decoded = yield* decodeAgyQuotaResponse(parsed);
+          const windows = summaryWindows(agyQuotaToSummary(decoded));
+          if (windows.length === 0) {
+            return makeUnavailableUsageLimits({
+              checkedAt,
+              reason: "probeFailed",
+              message: "Antigravity did not return usable quota information.",
+            });
+          }
+          const account = yield* sha256(
+            `agy-cli\0${cliCommand.value.executablePath}\0${cliCommand.value.env?.["HOME"] ?? process.env["HOME"] ?? ""}`,
+          );
+          return { ...makeUsageLimits({ checkedAt, windows }), credentialFingerprint: account };
+        }
+      }
       return makeUnavailableUsageLimits({
         checkedAt,
         reason: "unsupported",

@@ -136,8 +136,8 @@ const wrapFailure = (operation: string, detail: string) => (cause: unknown) =>
 
 function executableNames(platform: NodeJS.Platform) {
   return platform === "win32"
-    ? { executable: "agy_acp_server.exe", harness: "localharness_external.exe" }
-    : { executable: "agy_acp_server.par", harness: "localharness_external" };
+    ? { executable: "agy.exe", harness: "agy.exe" }
+    : { executable: "agy", harness: "agy" };
 }
 
 function isRunning(state: ProviderInstallState) {
@@ -252,8 +252,11 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
     if (!(yield* executableFile(candidate))) return null;
     const executablePath = yield* fs.realPath(candidate);
     const directory = path.dirname(executablePath);
-    const harnessPath = path.join(directory, names.harness);
-    if (!(yield* executableFile(harnessPath))) return null;
+    const siblingHarness = path.join(
+      directory,
+      platform === "win32" ? "localharness_external.exe" : "localharness_external",
+    );
+    const harnessPath = (yield* executableFile(siblingHarness)) ? siblingHarness : executablePath;
     const realVersions = yield* fs.realPath(versionsDirectory).pipe(Effect.option);
     if (
       Option.isSome(realVersions) &&
@@ -267,7 +270,7 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
       executablePath,
       harnessPath,
       source,
-      version: null,
+      version: "agy",
       managedVersionDirectory: null,
     } satisfies AntigravityExecutable;
   });
@@ -277,18 +280,32 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
       platform === "win32"
         ? Object.entries(processEnvironment).findLast(([key]) => key.toUpperCase() === "PATH")?.[1]
         : processEnvironment.PATH;
-    return (pathValue ?? "")
+    const fromPath = (pathValue ?? "")
       .split(platform === "win32" ? ";" : ":")
       .map((directory) => directory.trim().replace(/^"|"$/gu, ""))
       .filter((directory) => directory.length > 0)
       .map((directory) => path.resolve(directory, binary));
+    if (platform === "win32") {
+      return fromPath;
+    }
+    const home = processEnvironment.HOME?.trim();
+    const fallbacks = [
+      ...(home ? [path.resolve(home, ".local", "bin", binary)] : []),
+      path.resolve("/usr/local/bin", binary),
+      path.resolve("/usr/bin", binary),
+    ];
+    return [...new Set([...fromPath, ...fallbacks])];
   };
 
   const resolve: AntigravityInstallationService["resolve"] = Effect.fn(
     "AntigravityInstallation.resolve",
   )(
     function* (binaryPath?: string, processEnvironment?: NodeJS.ProcessEnv) {
-      const override = binaryPath?.trim();
+      const rawOverride = binaryPath?.trim();
+      const override =
+        rawOverride && !/agy_acp_server\.(?:par|exe)$/iu.test(rawOverride)
+          ? rawOverride
+          : undefined;
       if (override) {
         const candidates =
           path.isAbsolute(override) || override.includes("/") || override.includes("\\")
@@ -300,28 +317,26 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
         }
         return yield* installationError(
           "resolve",
-          "The custom Antigravity executable or its localharness_external sibling is missing or not executable.",
+          "The custom Antigravity (agy) executable is missing or not executable.",
         );
-      }
-      if (yield* fs.exists(activePath)) {
-        const active = yield* readRecord(activePath, ActiveRelease);
-        return yield* completedRelease(active.releaseId);
       }
       for (const candidate of pathCandidates(names.executable, processEnvironment)) {
         const selected = yield* fromExternal(candidate, "path");
         if (selected) return selected;
       }
+      if (yield* fs.exists(activePath)) {
+        const active = yield* readRecord(activePath, ActiveRelease);
+        return yield* completedRelease(active.releaseId);
+      }
       return yield* installationError(
         "resolve",
-        releaseAsset
-          ? "Antigravity is not installed. Install it in this environment or set a custom executable path."
-          : `Google does not publish an Antigravity runtime for ${platform}-${arch}. Use a supported environment or a custom executable.`,
+        "Antigravity CLI (agy) is not installed. Install agy on PATH (e.g. ~/.local/bin/agy) or set a custom executable path.",
       );
     },
     Effect.mapError(
       wrapFailure(
         "resolve",
-        "Could not read the Antigravity installation. Reinstall it or set a custom executable path.",
+        "Could not read the Antigravity (agy) installation. Install agy or set a custom executable path.",
       ),
     ),
   );
@@ -840,6 +855,14 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
   yield* Effect.gen(function* () {
     const canRemove = yield* fs.exists(managedDirectory);
     yield* SubscriptionRef.update(state, (current) => ({ ...current, canRemove }));
+    const resolved = yield* resolve().pipe(Effect.option);
+    if (Option.isSome(resolved)) {
+      yield* SubscriptionRef.update(state, (current) => ({
+        ...current,
+        installedVersion: resolved.value.version ?? "agy",
+      }));
+      return;
+    }
     if (!(yield* fs.exists(activePath))) return;
     const active = yield* readRecord(activePath, ActiveRelease);
     const installed = yield* completedRelease(active.releaseId);

@@ -39,7 +39,11 @@ import {
   type AntigravityAuthConfig,
 } from "../antigravityAuthSupport.ts";
 import {
+  buildAgyConfigOptions,
+  FALLBACK_AGY_MODELS,
+  isDirectAgyCliCommand,
   makeAntigravityAcpRuntime,
+  probeAgyCatalog,
   type AntigravityAcpRuntimeInput,
 } from "../acp/AntigravityAcpSupport.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
@@ -381,16 +385,55 @@ export const AntigravityDriver: ProviderDriver<
     const usage = yield* makeAntigravityUsageProbe({
       profileDirectory,
       authMethod: auth.authMethod,
+      resolveCliCommand: installation.resolve(settings.binaryPath, processEnvironment).pipe(
+        Effect.filterOrFail(
+          (resolved) => isDirectAgyCliCommand(resolved.executablePath),
+          () => new Error("Not a direct agy CLI executable."),
+        ),
+        Effect.map((resolved) => ({
+          executablePath: resolved.executablePath,
+          env: processEnvironment,
+        })),
+      ),
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
       Effect.provideService(Crypto.Crypto, crypto),
       Effect.provideService(HttpClient.HttpClient, httpClient),
     );
+    const probeCatalog = installation.resolve(settings.binaryPath, processEnvironment).pipe(
+      Effect.flatMap((resolved) => {
+        if (!isDirectAgyCliCommand(resolved.executablePath)) {
+          return Effect.succeed(undefined);
+        }
+        return probeAgyCatalog({
+          command: resolved.executablePath,
+          cwd: userHome,
+          env: processEnvironment,
+          spawner,
+        }).pipe(
+          Effect.orElseSucceed(() => ({
+            models: FALLBACK_AGY_MODELS,
+            defaultModelId: FALLBACK_AGY_MODELS[0]!.id,
+          })),
+          Effect.map((catalog) => ({
+            setup: {
+              configOptions: buildAgyConfigOptions(
+                catalog.models,
+                catalog.defaultModelId,
+                "default",
+              ),
+            },
+          })),
+        );
+      }),
+      Effect.orElseSucceed(() => undefined),
+    );
     const provider = yield* makeAntigravityProvider(settings, {
       stampIdentity: classifyModels,
       probe,
       probeUsage: usage.probe,
+      probeCatalog,
       clearUsage: usage.clear,
       auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
       supportsTextGeneration: isAntigravityTextGenerationAvailable(profileDirectory).pipe(
