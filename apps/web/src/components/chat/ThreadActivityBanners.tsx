@@ -16,19 +16,19 @@ import { Button, InlineButton } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+import type { ThreadNowItem } from "./ThreadNow";
 
 /** Subagents waiting on the user, unless the parent is itself waiting on them. */
-export function childInputBannerItem(input: {
+export function childInputNowItem(input: {
   readonly childThreadInputs: ReadonlyArray<EnvironmentThreadShell>;
   readonly parentAwaitingUser: boolean;
   readonly onOpenThread: (threadId: ThreadId) => void;
-}): ComposerBannerStackItem | null {
+}): ThreadNowItem | null {
   const { childThreadInputs, onOpenThread } = input;
   const first = childThreadInputs[0];
   if (!first || input.parentAwaitingUser) return null;
   return {
     id: `child-input:${first.id}`,
-    variant: "info",
     icon: first.hasPendingApprovals ? <ShieldQuestionIcon /> : <MessageCircleIcon />,
     title: childThreadInputsTitle(childThreadInputs),
     description: childThreadInputs.map((child, index) => (
@@ -43,36 +43,32 @@ export function childInputBannerItem(input: {
       </Fragment>
     )),
     actions: (
-      <Button size="xs" variant="ghost" onClick={() => onOpenThread(first.id)}>
+      <InlineButton onClick={() => onOpenThread(first.id)}>
         {first.hasPendingApprovals ? "Open approval" : "Open question"}
-      </Button>
+      </InlineButton>
     ),
   };
 }
 
-export function goalBannerItem(input: {
+/** The thread's goal, for the end of the timeline. */
+export function goalNowItem(input: {
   readonly threadId: ThreadId;
   readonly goal: OrchestrationV2ProviderGoal;
   readonly isWorking: boolean;
   readonly onSendCommand: (text: string, failureMessage: string) => Promise<void>;
-}): ComposerBannerStackItem {
+}): ThreadNowItem {
   const { isWorking, onSendCommand } = input;
   const presentation = presentProviderGoal(input.goal, isWorking);
-  // The token count opens the full usage, unless the full usage is all there is. A narrow
-  // paused row gives its room to Resume and Clear and moves the usage into the objective.
-  const usageClassName = cn("mx-2", !isWorking && "@max-[480px]:hidden");
-  const usageLabel =
+  // The token count opens the full usage, unless the full usage is all there is.
+  const usage =
     presentation.usage === null ? null : presentation.tokens === null ||
       presentation.tokens === presentation.usage ? (
-      <span className={cn(usageClassName, "whitespace-nowrap text-muted-foreground tabular-nums")}>
-        {presentation.usage}
-      </span>
+      <span className="whitespace-nowrap tabular-nums">{presentation.usage}</span>
     ) : (
       <Popover>
         <PopoverTrigger
           openOnHover
           render={<InlineButton tone="muted" />}
-          className={usageClassName}
           aria-label={`Goal usage: ${presentation.usage}`}
         >
           <span className="font-normal tabular-nums">{presentation.tokens}</span>
@@ -84,65 +80,53 @@ export function goalBannerItem(input: {
     );
   return {
     id: `goal:${input.threadId}`,
-    variant: "default",
-    group: "activity",
     icon: <TargetIcon />,
     title: presentation.title,
-    // In the row this shows only where the usage button hides; the details popover always has it.
-    description:
-      isWorking || presentation.usage === null ? (
-        presentation.objective
-      ) : (
-        <>
-          {presentation.objective}
-          <span className="in-data-composer-banner-row:hidden in-data-composer-banner-row:@max-[480px]:inline">
-            {" "}
-            · {presentation.usage}
-          </span>
-        </>
-      ),
+    description: presentation.objective,
     actions:
-      usageLabel === null && isWorking ? undefined : (
+      usage === null && isWorking ? undefined : (
         <>
-          {usageLabel}
-          {!isWorking && presentation.canResume ? (
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => void onSendCommand("/goal resume", "Failed to resume goal.")}
-            >
-              Resume
-            </Button>
-          ) : null}
+          {usage}
           {isWorking ? null : (
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => void onSendCommand("/goal clear", "Failed to clear goal.")}
-            >
-              Clear
-            </Button>
+            <>
+              {usage === null ? null : <span aria-hidden>·</span>}
+              {presentation.canResume ? (
+                <>
+                  <InlineButton
+                    onClick={() => void onSendCommand("/goal resume", "Failed to resume goal.")}
+                  >
+                    Resume
+                  </InlineButton>
+                  <span aria-hidden>·</span>
+                </>
+              ) : null}
+              <InlineButton
+                tone="muted"
+                onClick={() => void onSendCommand("/goal clear", "Failed to clear goal.")}
+              >
+                Clear
+              </InlineButton>
+            </>
           )}
         </>
       ),
   };
 }
 
-export function backgroundWorkBannerItem(input: {
+/** Background commands and subagents, for the end of the timeline. */
+export function backgroundWorkNowItem(input: {
   readonly threadId: ThreadId;
   readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
   readonly stopDisabled: boolean;
   readonly stopping: boolean;
   readonly onStop: () => Promise<void>;
   readonly onOpenThread: (threadId: ThreadId) => void;
-}): ComposerBannerStackItem | null {
+}): ThreadNowItem | null {
   const { onOpenThread } = input;
   const presentation = presentPendingBackgroundWork(input.tasks);
   if (presentation === null) return null;
   return {
     id: `background-work:${input.threadId}`,
-    variant: "default",
-    group: "activity",
     icon: (
       <span
         className={cn(
@@ -183,14 +167,9 @@ export function backgroundWorkBannerItem(input: {
             );
           }),
     actions: (
-      <Button
-        size="xs"
-        variant="ghost"
-        disabled={input.stopDisabled}
-        onClick={() => void input.onStop()}
-      >
+      <InlineButton disabled={input.stopDisabled} onClick={() => void input.onStop()}>
         {input.stopping ? "Stopping..." : "Stop"}
-      </Button>
+      </InlineButton>
     ),
   };
 }

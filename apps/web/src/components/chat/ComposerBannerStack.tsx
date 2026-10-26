@@ -8,10 +8,10 @@ import { ComposerBanner, type ComposerBannerVariant } from "./ComposerBanner";
 import { observeResize } from "~/lib/observeResize";
 
 /**
- * Where a notice sits on the shelf. Groups keep a fixed order, so rows never trade places as
- * states come and go: the machine first, then what needs you, then what the agent is doing.
+ * Where a notice sits above the composer. The machine comes first, then what needs you; the
+ * order is fixed so rows never trade places as notices come and go.
  */
-export type ComposerBannerGroup = "environment" | "attention" | "activity";
+export type ComposerBannerGroup = "environment" | "attention";
 
 export interface ComposerBannerStackItem {
   readonly id: string;
@@ -26,73 +26,48 @@ export interface ComposerBannerStackItem {
   readonly onDismiss?: () => void;
 }
 
-interface ComposerBannerStackProps {
+const GROUPS = ["environment", "attention"] as const;
+
+/** Notices about sending from this composer, on one attached surface. */
+export function ComposerBannerStack({
+  items,
+}: {
   readonly items: ReadonlyArray<ComposerBannerStackItem>;
-  /** The agent's tasks or the sync status, last in the activity group. */
-  readonly activity?: ReactNode;
-  /** Queued messages, nearest the composer. */
-  readonly queue?: ReactNode;
-}
-
-const GROUPS = ["environment", "attention", "activity"] as const;
-
-/**
- * Everything above the composer, on one attached surface: one row per concern, nothing hidden
- * behind another card, nothing floating over the transcript.
- */
-export function ComposerBannerStack({ items, activity, queue }: ComposerBannerStackProps) {
-  if (items.length === 0 && !activity && !queue) return null;
-  const bands = GROUPS.map((group) => ({
-    group,
-    items: items.filter((item) => (item.group ?? "attention") === group),
-  }));
+}) {
+  const bands = GROUPS.map((group) =>
+    items.filter((item) => (item.group ?? "attention") === group),
+  ).filter((band) => band.length > 0);
+  if (bands.length === 0) return null;
   return (
-    <ComposerBanner.Attachment
-      data-composer-banner-stack="true"
-      className={cn(
-        "not-has-[[data-composer-shelf-band]:not(:empty)]:hidden",
-        // A hidden shelf must not join the next attachment to it (the queue can render nothing).
-        "not-has-[[data-composer-shelf-band]:not(:empty)]:[&+[data-slot=composer-banner-attachment]_[data-composer-banner-surface=attached]]:before:rounded-t-2xl",
-        "not-has-[[data-composer-shelf-band]:not(:empty)]:[&+[data-slot=composer-banner-attachment]_[data-composer-banner-surface=attached]]:before:border-t",
-      )}
-    >
+    <ComposerBanner.Attachment data-composer-banner-stack="true">
       <ComposerBanner.Root
         role="region"
-        aria-label="Thread status"
+        aria-label="Notices"
         density="comfortable"
         data-chat-composer-collapsed-controls="true"
         className={cn(
-          "[&>[data-composer-shelf-band]:not(:empty)~[data-composer-shelf-band]:not(:empty)]:border-t",
+          "[&>[data-composer-shelf-band]+[data-composer-shelf-band]]:border-t",
           // The first row's corner button nests inside the shelf's top-right radius.
-          "[&>[data-composer-shelf-band]:nth-child(1_of_:not(:empty))>[data-composer-shelf-row]:first-child>[data-composer-banner-row]>[data-slot=composer-banner-actions]>[data-slot=button]:last-child]:rounded-se-xl",
+          "[&>[data-composer-shelf-band]:first-child>[data-composer-shelf-row]:first-child>[data-composer-banner-row]>[data-slot=composer-banner-actions]>[data-slot=button]:last-child]:rounded-se-xl",
         )}
       >
         {bands.map((band) => (
-          <ShelfBand key={band.group} name={band.group}>
-            {band.items.map((item) => (
+          <div
+            key={band[0]!.group ?? "attention"}
+            data-composer-shelf-band="true"
+            className="-mx-1 border-(--chat-composer-attached-outline) px-1 py-0.5 *:transition-opacity *:duration-150 *:ease-out *:starting:opacity-0 motion-reduce:*:transition-none"
+          >
+            {band.map((item) => (
               <ShelfRow key={item.id} item={item} />
             ))}
-            {band.group === "activity" ? activity : null}
-          </ShelfBand>
+          </div>
         ))}
-        <ShelfBand name="queue">{queue}</ShelfBand>
       </ComposerBanner.Root>
     </ComposerBanner.Attachment>
   );
 }
 
-function ShelfBand({ name, children }: { readonly name: string; readonly children: ReactNode }) {
-  return (
-    <div
-      data-composer-shelf-band={name}
-      className="-mx-1 border-(--chat-composer-attached-outline) px-1 py-0.5 empty:hidden *:transition-opacity *:duration-150 *:ease-out *:starting:opacity-0 motion-reduce:*:transition-none"
-    >
-      {children}
-    </div>
-  );
-}
-
-function NoticeText({
+export function NoticeText({
   children,
   className,
   detailsLabel,
@@ -181,7 +156,7 @@ function ShelfRow({ item }: { readonly item: ComposerBannerStackItem }) {
           "bg-warning/8 [&>[data-composer-banner-row]>[data-slot=composer-banner-icon]]:text-warning-foreground",
       )}
     >
-      <ComposerBanner.Row layout={item.group === "activity" ? "inline" : "wrap-actions"}>
+      <ComposerBanner.Row layout="wrap-actions">
         <ComposerBanner.Icon className="h-(--composer-banner-icon-column) self-start">
           {item.icon}
         </ComposerBanner.Icon>
@@ -204,11 +179,9 @@ function ShelfRow({ item }: { readonly item: ComposerBannerStackItem }) {
                   : "Show notice details"
               }
               className={cn(
-                "w-0 min-w-0 grow truncate",
+                "w-0 min-w-0 grow truncate @max-[400px]:sr-only",
                 // Muted text falls under 4.5:1 on the light problem tints.
                 problem ? "text-foreground/65" : "text-muted-foreground",
-                // What the agent is working toward stays visible; notices keep only their title.
-                item.group !== "activity" && "@max-[400px]:sr-only",
               )}
             >
               {item.description}

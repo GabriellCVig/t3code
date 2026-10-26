@@ -11,32 +11,20 @@ function notice(title: string, group?: ComposerBannerStackItem["group"]): Compos
   return { id: title, variant: "default", icon: <InfoIcon />, title, ...(group ? { group } : {}) };
 }
 
-function EmptyQueue() {
-  return null;
-}
-
-it("keeps rows in fixed groups whatever order the notices arrive in", async () => {
+it("puts machine notices first, whatever order the notices arrive in", async () => {
   await using screen = await render(
-    <ComposerBannerStack
-      items={[
-        notice("Goal", "activity"),
-        notice("Branch changed"),
-        notice("Offline", "environment"),
-      ]}
-      activity={<span>Tasks</span>}
-      queue={<span>Queued</span>}
-    />,
+    <ComposerBannerStack items={[notice("Branch changed"), notice("Offline", "environment")]} />,
   );
 
-  expect(screen.getByRole("region", { name: "Thread status" }).element().textContent).toBe(
-    "OfflineBranch changedGoalTasksQueued",
+  expect(screen.getByRole("region", { name: "Notices" }).element().textContent).toBe(
+    "OfflineBranch changed",
   );
 });
 
-it("leaves the next attachment its own top edge when the shelf has nothing to show", async () => {
+it("leaves the next attachment its own top edge when there are no notices", async () => {
   await using screen = await render(
     <ComposerBanner.Column>
-      <ComposerBannerStack items={[]} queue={<EmptyQueue />} />
+      <ComposerBannerStack items={[]} />
       <ComposerBanner.Attachment>
         <ComposerBanner.Root data-testid="drawer">Approval</ComposerBanner.Root>
       </ComposerBanner.Attachment>
