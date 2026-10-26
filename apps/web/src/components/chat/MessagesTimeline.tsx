@@ -274,7 +274,7 @@ interface MessagesTimelineProps {
   liveFollowEnabled: boolean;
   onContentOverflowChange?: (overflows: boolean) => void;
   onToolOutputCollapsedAtEnd?: () => void;
-  /** The footer's content grew, such as a new queued turn or an opened task list. */
+  /** The footer's content grew, such as a new queued turn or status line. */
   onFooterGrow?: () => void;
   onManualNavigation: () => void;
   findOpen?: boolean;

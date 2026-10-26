@@ -244,14 +244,15 @@ export function QueuedRunsControl({
   return (
     <section
       aria-label={`Up next: ${items.length} queued message${items.length === 1 ? "" : "s"}`}
-      aria-live="polite"
       data-thread-queue="true"
       className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col gap-2 pb-4"
     >
-      <h3 className="flex items-center gap-1.5 px-1 text-xs font-normal text-muted-foreground [&_svg]:size-3.5">
+      <h3 className="flex min-h-5 items-center gap-1.5 px-1 text-xs font-normal text-muted-foreground [&_svg]:size-3.5">
         <ListOrderedIcon aria-hidden />
         Up next
-        <span className="tabular-nums">· {items.length} queued</span>
+        <span className="tabular-nums" aria-live="polite">
+          · {items.length} queued
+        </span>
       </h3>
       <ol className="flex flex-col items-end gap-3" id={queueListId}>
         {visibleItems.map((item, position) => {

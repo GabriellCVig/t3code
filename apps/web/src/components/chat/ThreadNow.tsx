@@ -25,9 +25,20 @@ const lineClassName = cn(
 );
 
 /** One line of thread state at the end of the timeline: icon, title, detail, then actions. */
-function ThreadNowLine({ item }: { readonly item: ThreadNowItem }) {
+function ThreadNowLine({
+  item,
+  announce = false,
+}: {
+  readonly item: ThreadNowItem;
+  /** Announces the line when it appears; only for something that needs the user. */
+  readonly announce?: boolean;
+}) {
   return (
-    <div className={lineClassName} data-thread-now-line="true">
+    <div
+      role={announce ? "alert" : undefined}
+      className={lineClassName}
+      data-thread-now-line="true"
+    >
       <span aria-hidden className="flex size-3.5 shrink-0 items-center justify-center">
         {item.icon}
       </span>
@@ -37,10 +48,15 @@ function ThreadNowLine({ item }: { readonly item: ThreadNowItem }) {
         detailsLabel={
           typeof item.title === "string" ? `Show details: ${item.title}` : "Show details"
         }
-        className="min-w-0 flex-1 truncate"
+        className="min-w-0 truncate"
       >
         {item.title}
-        {item.description ? <> {item.description}</> : null}
+        {item.description ? (
+          <>
+            <span aria-hidden> · </span>
+            {item.description}
+          </>
+        ) : null}
       </NoticeText>
       {item.actions ? (
         <>
@@ -79,7 +95,7 @@ export function ThreadNow({
 }): ReactNode {
   return (
     <>
-      {attention ? <ThreadNowLine item={attention} /> : null}
+      {attention ? <ThreadNowLine item={attention} announce /> : null}
       {work ? <ThreadNowLine item={work} /> : null}
       {syncPhase ? <ThreadSyncLine phase={syncPhase} /> : null}
       {goal ? <ThreadNowLine item={goal} /> : null}
