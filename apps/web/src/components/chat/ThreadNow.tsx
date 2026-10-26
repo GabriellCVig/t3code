@@ -18,7 +18,7 @@ export interface ThreadNowItem {
 const lineClassName = cn(
   "mx-auto flex w-full min-w-0 max-w-(--chat-content-max-width) items-center gap-1.5 px-1 pb-2 text-xs text-muted-foreground [&_svg]:size-3.5 [&_svg]:shrink-0",
   // A details button must not make its line taller than the others.
-  "[&_[data-slot=button]]:-my-1.5",
+  "[&_[data-slot=popover-trigger]]:-my-1.5",
   // Inline actions keep their text size but get a finger-sized hit area on touch.
   "pointer-coarse:[&_[data-slot=inline-button]]:relative pointer-coarse:[&_[data-slot=inline-button]]:after:absolute pointer-coarse:[&_[data-slot=inline-button]]:after:-inset-x-1.5 pointer-coarse:[&_[data-slot=inline-button]]:after:-inset-y-3.5",
   "transition-opacity duration-150 ease-out starting:opacity-0 motion-reduce:transition-none",
@@ -53,8 +53,8 @@ function ThreadNowLine({
         {item.title}
         {item.description ? (
           <>
-            <span aria-hidden> · </span>
-            {item.description}
+            {" "}
+            <span aria-hidden>·</span> {item.description}
           </>
         ) : null}
       </NoticeText>
