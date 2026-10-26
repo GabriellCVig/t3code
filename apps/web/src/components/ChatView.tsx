@@ -2950,11 +2950,15 @@ export default function ChatView(props: ChatViewProps) {
     goalNow !== null ||
     shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
-  // The queue control is mounted for every server thread; it only belongs in the footer, and keeps
-  // the empty-thread placeholder away, while something is queued.
+  // The queue control is mounted for every server thread but joins the footer only while it shows
+  // something, by its own rule: an optimistic message stops counting once the server has it.
   const hasQueuedTurns =
     queuedRunCount > 0 ||
-    optimisticUserMessages.some((message) => message.inputIntent === "queued_turn");
+    optimisticUserMessages.some(
+      (message) =>
+        message.inputIntent === "queued_turn" &&
+        !serverProjection?.messages.some((committed) => committed.id === message.id),
+    );
   const scrollToEndSummary =
     [
       childInputNow === null ? null : "Subagent waiting",
