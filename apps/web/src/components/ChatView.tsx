@@ -128,8 +128,6 @@ import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
 import { composerRequiresModifier } from "../composer-logic";
 import {
   derivePhase,
-  deriveActivePlanState,
-  selectComposerTasksPlan,
   deriveActiveWorkStartedAt,
   deriveCanInterruptRunningThread,
   findLatestProposedPlan,
@@ -993,30 +991,6 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const latestRunSettled = isLatestRunSettled(activeLatestRun, activeRuntime);
-  const activePlan = deriveActivePlanState(serverProjection, activeActivityRun?.runId);
-  const activeActivityRunSettled = isLatestRunSettled(activeActivityRun, activeRuntime);
-  const composerTasksPlan = selectComposerTasksPlan(
-    serverProjection,
-    activePlan,
-    activeActivityRun?.runId ?? null,
-    activeActivityRunSettled,
-  );
-  const activeComposerTasksProgress = (() => {
-    if (!composerTasksPlan) return null;
-    const live = !activeActivityRunSettled && composerTasksPlan.runId === activeActivityRun?.runId;
-    const totalSteps = composerTasksPlan.steps.length;
-    if (totalSteps === 0) return null;
-    const completedSteps = composerTasksPlan.steps.filter(
-      (step) => step.status === "completed",
-    ).length;
-    const step =
-      composerTasksPlan.steps.find((candidate) => candidate.status === "inProgress")?.step ??
-      composerTasksPlan.steps.find((candidate) => candidate.status === "pending")?.step ??
-      composerTasksPlan.steps.at(-1)!.step;
-    return { step, completedSteps, totalSteps, live };
-  })();
-  const activeComposerTaskSteps =
-    activeComposerTasksProgress && composerTasksPlan ? composerTasksPlan.steps : null;
   const activeThreadEnvironmentId = activeThread?.environmentId;
   const activeThreadProjectId = activeThread?.projectId;
   const activeProjectRef =
@@ -2014,6 +1988,7 @@ export default function ChatView(props: ChatViewProps) {
     onTimelineAnchorReadyStable,
     onTimelineAnchorSizeChangedStable,
     onToolOutputCollapsedAtEndStable,
+    onTimelineFooterGrowStable,
     onIsAtEndChangeStable,
     anchorNewTurn,
   } = useTimelineFollow({
@@ -2967,22 +2942,22 @@ export default function ChatView(props: ChatViewProps) {
   };
   const onExpandTimelineImageStable = useStableCallback(onExpandTimelineImage);
   const shownThreadSyncPhase = activeEnvironmentUnavailable ? null : delayedThreadSyncPhase;
-  const threadNowTasks =
-    activeComposerTasksProgress && activeComposerTaskSteps
-      ? { progress: activeComposerTasksProgress, steps: activeComposerTaskSteps }
-      : null;
   const hasThreadNow =
     childInputNow !== null ||
     backgroundWorkNow !== null ||
     goalNow !== null ||
-    shownThreadSyncPhase !== null ||
-    threadNowTasks !== null;
+    shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection
     ? deriveThreadQueueWorkflowState(serverProjection).queuedRuns.length
     : 0;
+  // The queue control is mounted for every server thread; it only belongs in the footer, and keeps
+  // the empty-thread placeholder away, while something is queued.
+  const hasQueuedTurns =
+    queuedRunCount > 0 ||
+    optimisticUserMessages.some((message) => message.inputIntent === "queued_turn");
   const scrollToEndSummary =
     [
-      childInputNow === null ? null : "Needs input",
+      childInputNow === null ? null : "Subagent waiting",
       queuedRunCount === 0 ? null : `${queuedRunCount} queued`,
     ]
       .filter((part) => part !== null)
@@ -2994,7 +2969,7 @@ export default function ChatView(props: ChatViewProps) {
     !hasThreadNow &&
     threadStatusLine === null &&
     pendingGuestMessageCount === 0 &&
-    queuedRunsControl === null ? null : (
+    !hasQueuedTurns ? null : (
       <>
         {pendingHandoff === null ? null : (
           <div className="chat-content-lane">
@@ -3010,7 +2985,6 @@ export default function ChatView(props: ChatViewProps) {
           key={routeThreadKey}
           attention={childInputNow}
           work={backgroundWorkNow}
-          tasks={threadNowTasks}
           syncPhase={shownThreadSyncPhase}
           goal={goalNow}
         />
@@ -3022,7 +2996,7 @@ export default function ChatView(props: ChatViewProps) {
             onFileOpen={openFileAttachmentStable}
           />
         ) : null}
-        {queuedRunsControl}
+        {hasQueuedTurns ? queuedRunsControl : null}
       </>
     );
 
@@ -3386,6 +3360,7 @@ export default function ChatView(props: ChatViewProps) {
                 onIsAtEndChange={onIsAtEndChangeStable}
                 onContentOverflowChange={setTimelineOverflows}
                 onToolOutputCollapsedAtEnd={onToolOutputCollapsedAtEndStable}
+                onFooterGrow={onTimelineFooterGrowStable}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigationStable}
                 cancelPositionRestoreRef={cancelPositionRestoreRef}
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}

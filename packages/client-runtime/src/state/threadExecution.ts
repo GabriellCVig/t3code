@@ -364,8 +364,6 @@ export interface ProviderGoalPresentation {
   readonly title: string;
   readonly objective: string;
   readonly usage: string | null;
-  /** The token count alone, for tight layouts: "412K / 2M", or "412K tokens" without a budget. */
-  readonly tokens: string | null;
   readonly canResume: boolean;
 }
 
@@ -380,8 +378,8 @@ const PROVIDER_GOAL_TITLES: Record<OrchestrationV2ProviderGoal["status"], string
 
 function formatGoalTokens(tokens: number): string {
   if (tokens < 1_000) return `${tokens}`;
-  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}K`;
-  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}k`;
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
 }
 
 export function presentProviderGoal(
@@ -389,13 +387,13 @@ export function presentProviderGoal(
   working: boolean,
 ): ProviderGoalPresentation {
   const usage: Array<string> = [];
-  const tokens =
-    goal.tokensUsed === undefined || goal.tokensUsed <= 0
-      ? null
-      : goal.tokenBudget == null
+  if (goal.tokensUsed !== undefined && goal.tokensUsed > 0) {
+    usage.push(
+      goal.tokenBudget == null
         ? `${formatGoalTokens(goal.tokensUsed)} tokens`
-        : `${formatGoalTokens(goal.tokensUsed)} / ${formatGoalTokens(goal.tokenBudget)}`;
-  if (tokens !== null) usage.push(goal.tokenBudget == null ? tokens : `${tokens} tokens`);
+        : `${formatGoalTokens(goal.tokensUsed)} / ${formatGoalTokens(goal.tokenBudget)} tokens`,
+    );
+  }
   if (goal.timeUsedSeconds !== undefined && goal.timeUsedSeconds >= 60) {
     usage.push(formatDuration(goal.timeUsedSeconds * 1_000));
   }
@@ -406,7 +404,6 @@ export function presentProviderGoal(
     title: goal.status === "active" && !working ? "Goal set" : PROVIDER_GOAL_TITLES[goal.status],
     objective: goal.objective,
     usage: usage.length === 0 ? null : usage.join(" · "),
-    tokens,
     canResume: goal.status !== "active" && goal.status !== "complete",
   };
 }

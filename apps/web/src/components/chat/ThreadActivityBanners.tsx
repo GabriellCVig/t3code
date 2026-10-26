@@ -13,7 +13,6 @@ import { GitBranchIcon, MessageCircleIcon, ShieldQuestionIcon, TargetIcon } from
 import { Fragment } from "react";
 import { cn } from "~/lib/utils";
 import { Button, InlineButton } from "../ui/button";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 import type { ThreadNowItem } from "./ThreadNow";
@@ -29,7 +28,12 @@ export function childInputNowItem(input: {
   if (!first || input.parentAwaitingUser) return null;
   return {
     id: `child-input:${first.id}`,
-    icon: first.hasPendingApprovals ? <ShieldQuestionIcon /> : <MessageCircleIcon />,
+    // The only line at the end of the timeline that needs you gets the info color.
+    icon: first.hasPendingApprovals ? (
+      <ShieldQuestionIcon className="text-info-foreground" />
+    ) : (
+      <MessageCircleIcon className="text-info-foreground" />
+    ),
     title: childThreadInputsTitle(childThreadInputs),
     description: childThreadInputs.map((child, index) => (
       <Fragment key={child.id}>
@@ -59,57 +63,34 @@ export function goalNowItem(input: {
 }): ThreadNowItem {
   const { isWorking, onSendCommand } = input;
   const presentation = presentProviderGoal(input.goal, isWorking);
-  // The token count opens the full usage, unless the full usage is all there is.
-  const usage =
-    presentation.usage === null ? null : presentation.tokens === null ||
-      presentation.tokens === presentation.usage ? (
-      <span className="whitespace-nowrap tabular-nums">{presentation.usage}</span>
-    ) : (
-      <Popover>
-        <PopoverTrigger
-          openOnHover
-          render={<InlineButton tone="muted" />}
-          aria-label={`Goal usage: ${presentation.usage}`}
-        >
-          <span className="font-normal tabular-nums">{presentation.tokens}</span>
-        </PopoverTrigger>
-        <PopoverPopup tooltipStyle side="top">
-          {presentation.usage}
-        </PopoverPopup>
-      </Popover>
-    );
   return {
     id: `goal:${input.threadId}`,
     icon: <TargetIcon />,
-    title: presentation.title,
+    title:
+      presentation.usage === null
+        ? presentation.title
+        : `${presentation.title} · ${presentation.usage}`,
     description: presentation.objective,
-    actions:
-      usage === null && isWorking ? undefined : (
-        <>
-          {usage}
-          {isWorking ? null : (
-            <>
-              {usage === null ? null : <span aria-hidden>·</span>}
-              {presentation.canResume ? (
-                <>
-                  <InlineButton
-                    onClick={() => void onSendCommand("/goal resume", "Failed to resume goal.")}
-                  >
-                    Resume
-                  </InlineButton>
-                  <span aria-hidden>·</span>
-                </>
-              ) : null}
-              <InlineButton
-                tone="muted"
-                onClick={() => void onSendCommand("/goal clear", "Failed to clear goal.")}
-              >
-                Clear
-              </InlineButton>
-            </>
-          )}
-        </>
-      ),
+    actions: isWorking ? undefined : (
+      <>
+        {presentation.canResume ? (
+          <>
+            <InlineButton
+              onClick={() => void onSendCommand("/goal resume", "Failed to resume goal.")}
+            >
+              Resume
+            </InlineButton>
+            <span aria-hidden>·</span>
+          </>
+        ) : null}
+        <InlineButton
+          tone="muted"
+          onClick={() => void onSendCommand("/goal clear", "Failed to clear goal.")}
+        >
+          Clear
+        </InlineButton>
+      </>
+    ),
   };
 }
 

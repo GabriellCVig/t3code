@@ -571,6 +571,14 @@ export function useTimelineFollow(input: TimelineFollowInput) {
     composerRef.current?.restoreAfterTimelineReachedEnd();
   };
   const onToolOutputCollapsedAtEndStable = useStableCallback(onToolOutputCollapsedAtEnd);
+  // The list ignores footer layout, so a new queued turn or an opened task list there would land
+  // under the composer. Follow it when the reader was at the end.
+  const onTimelineFooterGrow = () => {
+    if (timelineScrollModeRef.current === "following-end" && isAtEndRef.current) {
+      scrollToEndStable();
+    }
+  };
+  const onTimelineFooterGrowStable = useStableCallback(onTimelineFooterGrow);
 
   const onIsAtEndChange = (isAtEnd: boolean) => {
     if (
@@ -683,6 +691,7 @@ export function useTimelineFollow(input: TimelineFollowInput) {
     onTimelineAnchorReadyStable,
     onTimelineAnchorSizeChangedStable,
     onToolOutputCollapsedAtEndStable,
+    onTimelineFooterGrowStable,
     onIsAtEndChangeStable,
     anchorNewTurn,
   };

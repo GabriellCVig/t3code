@@ -44,7 +44,10 @@ export function ScrollToEndButton(props: {
         <ChevronDownIcon className="size-3.5" />
         Scroll to end
         {props.summary === null ? null : (
-          <span className="text-muted-foreground">· {props.summary}</span>
+          <span className="text-muted-foreground">
+            <span aria-hidden>· </span>
+            {props.summary}
+          </span>
         )}
       </Button>
     </div>

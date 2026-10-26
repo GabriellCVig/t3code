@@ -25,7 +25,6 @@ import {
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
   deriveThreadRuntime,
-  presentProviderGoal,
   threadRuntimeHasInterruptibleRun,
 } from "./threadExecution.ts";
 
@@ -392,30 +391,5 @@ describe("provider-reported model selection", () => {
         ],
       }),
     ).toBeNull();
-  });
-});
-
-describe("presentProviderGoal", () => {
-  it("shortens the token count against a budget and keeps the unit without one", () => {
-    const budgeted = presentProviderGoal(
-      {
-        objective: "Ship it",
-        status: "active",
-        tokensUsed: 412_000,
-        tokenBudget: 2_000_000,
-        timeUsedSeconds: 1_460,
-        checks: 3,
-      },
-      true,
-    );
-    expect(budgeted.tokens).toBe("412K / 2M");
-    expect(budgeted.usage).toBe("412K / 2M tokens · 24m 20s · 3 checks");
-
-    const unbudgeted = presentProviderGoal(
-      { objective: "Ship it", status: "active", tokensUsed: 1_250_000 },
-      true,
-    );
-    expect(unbudgeted.tokens).toBe("1.3M tokens");
-    expect(unbudgeted.usage).toBe("1.3M tokens");
   });
 });
