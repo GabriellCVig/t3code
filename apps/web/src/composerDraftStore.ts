@@ -49,8 +49,10 @@ import type {
   EnvironmentShellState,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import { waitForDraftHeroTransition } from "./components/chat/draftHeroTransition";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { readThreadPreviewState } from "./previewStateStore";
+import type { ThreadRouteTarget } from "./threadRoutes";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
 import {
   DEFAULT_INTERACTION_MODE,
@@ -416,6 +418,12 @@ interface ComposerDraftStoreState {
   draftThreadsByThreadKey: Record<string, DraftThreadState>;
   logicalProjectDraftThreadKeyByLogicalProjectKey: Record<string, string>;
   backgroundSubmissionThreadKeys: Record<string, true>;
+  /**
+   * Where a just-finalized draft went, so its route and ChatView follow it. Only the handoff
+   * needs it: `retainPromotedDraftRedirectsForRoute` drops entries the open route no longer
+   * shows, so a later visit to the thread renders the shared unkeyed ChatView.
+   */
+  promotedDraftRedirects: Record<string, ScopedThreadRef>;
   rewindingThreadKeys: ReadonlySet<string>;
   stickyModelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   stickyOptionsByModelByProvider: Partial<
@@ -430,6 +438,9 @@ interface ComposerDraftStoreState {
   getDraftSession: (draftId: DraftId) => DraftSessionState | null;
   getDraftSessionByRef: (threadRef: ScopedThreadRef) => DraftSessionState | null;
   getDraftIdByRef: (threadRef: ScopedThreadRef) => DraftId | null;
+  getPromotedDraftRedirect: (draftId: DraftId) => ScopedThreadRef | null;
+  getPromotedDraftIdByRef: (threadRef: ScopedThreadRef) => DraftId | null;
+  retainPromotedDraftRedirectsForRoute: (route: ThreadRouteTarget | null) => void;
   getDraftThreadByRef: (threadRef: ScopedThreadRef) => DraftThreadState | null;
   getDraftThread: (threadRef: ComposerThreadTarget) => DraftThreadState | null;
   listDraftThreadKeys: () => string[];
@@ -2393,6 +2404,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         draftThreadsByThreadKey: {},
         logicalProjectDraftThreadKeyByLogicalProjectKey: {},
         backgroundSubmissionThreadKeys: {},
+        promotedDraftRedirects: {},
         rewindingThreadKeys: new Set<string>(),
         stickyModelSelectionByProvider: {},
         stickyOptionsByModelByProvider: {},
@@ -2471,6 +2483,28 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
           }
           return null;
+        },
+        getPromotedDraftRedirect: (draftId) => get().promotedDraftRedirects[draftId] ?? null,
+        getPromotedDraftIdByRef: (threadRef) => {
+          for (const [draftId, promotedTo] of Object.entries(get().promotedDraftRedirects)) {
+            if (scopedThreadRefsEqual(promotedTo, threadRef)) {
+              return DraftId.make(draftId);
+            }
+          }
+          return null;
+        },
+        retainPromotedDraftRedirectsForRoute: (route) => {
+          set((state) => {
+            const entries = Object.entries(state.promotedDraftRedirects);
+            const retained = entries.filter(([draftId, promotedTo]) =>
+              route?.kind === "draft"
+                ? route.draftId === draftId
+                : route?.kind === "server" && scopedThreadRefsEqual(promotedTo, route.threadRef),
+            );
+            return retained.length === entries.length
+              ? state
+              : { promotedDraftRedirects: Object.fromEntries(retained) };
+          });
         },
         getDraftThread: (threadRef) => {
           if (typeof threadRef === "string") {
@@ -2758,10 +2792,16 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           }
           set((state) => {
             const existing = state.draftThreadsByThreadKey[threadKey];
-            if (!existing || !isDraftThreadPromoting(existing)) {
+            if (!existing?.promotedTo) {
               return state;
             }
-            return removeDraftThreadReferences(state, threadKey, existing.promotedTo ?? undefined);
+            return {
+              ...removeDraftThreadReferences(state, threadKey, existing.promotedTo),
+              promotedDraftRedirects: {
+                ...state.promotedDraftRedirects,
+                [threadKey]: existing.promotedTo,
+              },
+            };
           });
         },
         clearDraftThread: (threadRef) => {
@@ -4204,13 +4244,6 @@ export function clearBackgroundDraftSubmissionByRef(threadRef: ScopedThreadRef):
   });
 }
 
-export function useBackgroundDraftSubmissionPending(threadRef: ScopedThreadRef | null): boolean {
-  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
-  return useComposerDraftStore(
-    (state) => threadKey !== null && state.backgroundSubmissionThreadKeys[threadKey] === true,
-  );
-}
-
 export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): void {
   useComposerDraftStore.setState((state) => {
     const removedThreadKeys = new Set<string>();
@@ -4260,12 +4293,18 @@ export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): vo
         ([threadKey]) => parseScopedThreadKey(threadKey)?.environmentId !== environmentId,
       ),
     ) as Record<string, true>;
+    const nextPromotedDraftRedirects = Object.fromEntries(
+      Object.entries(state.promotedDraftRedirects).filter(
+        ([, promotedTo]) => promotedTo.environmentId !== environmentId,
+      ),
+    ) as Record<string, ScopedThreadRef>;
 
     return {
       draftsByThreadKey: nextDrafts,
       draftThreadsByThreadKey: nextDraftThreads,
       logicalProjectDraftThreadKeyByLogicalProjectKey: nextLogicalMappings,
       backgroundSubmissionThreadKeys: nextBackgroundSubmissionThreadKeys,
+      promotedDraftRedirects: nextPromotedDraftRedirects,
       rewindingThreadKeys: new Set(
         [...state.rewindingThreadKeys].filter(
           (threadKey) => parseScopedThreadKey(threadKey)?.environmentId !== environmentId,
@@ -4350,4 +4389,97 @@ export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): vo
     }
   }
   clearBackgroundDraftSubmissionByRef(threadRef);
+}
+
+type DraftPromotionShell = Pick<EnvironmentThreadShell, "latestRun" | "latestUserMessageAt">;
+
+/** The server owns a draft's send once its message persisted or its run started or stopped. */
+export function resolveDraftPromotionNavigationTarget(input: {
+  serverThreadRef: ScopedThreadRef | null;
+  serverThread: DraftPromotionShell | null | undefined;
+  backgroundSubmissionPending: boolean;
+}): ScopedThreadRef | null {
+  if (input.backgroundSubmissionPending) {
+    return null;
+  }
+  const latestRun = input.serverThread?.latestRun ?? null;
+  const runStarted = latestRun?.startedAt != null;
+  const startupStopped =
+    latestRun?.status === "failed" ||
+    latestRun?.status === "interrupted" ||
+    latestRun?.status === "cancelled";
+  const messagePersisted = input.serverThread?.latestUserMessageAt != null;
+  return runStarted || startupStopped || messagePersisted ? input.serverThreadRef : null;
+}
+
+/**
+ * Drives every draft through promotion as server shells arrive: a draft whose reserved thread
+ * appears on the server becomes promoting, and once the server owns its send (and any hero
+ * transition has played) it finalizes into that thread. The draft route follows the redirect
+ * that finalization records, so no route has to watch for these milestones.
+ */
+export function subscribeDraftThreadPromotion(input: {
+  readonly registry: AtomRegistry.AtomRegistry;
+  readonly threadRefsAtom: Atom.Atom<ReadonlyArray<ScopedThreadRef>>;
+  readonly threadShellAtom: (ref: ScopedThreadRef) => Atom.Atom<DraftPromotionShell | null>;
+}): () => void {
+  const draftsAtom = Atom.make(composerDraftStore.getState());
+  const unsubscribeDrafts = composerDraftStore.subscribe((state) =>
+    input.registry.set(draftsAtom, state),
+  );
+  const threadKeysAtom = Atom.map(
+    input.threadRefsAtom,
+    (refs) => new Set(refs.map(scopedThreadKey)),
+  );
+  const milestonesAtom = Atom.make((get) => {
+    const state = get(draftsAtom);
+    const threadKeys = get(threadKeysAtom);
+    const arrived: Array<readonly [DraftId, ScopedThreadRef]> = [];
+    const owned: Array<readonly [DraftId, ScopedThreadRef]> = [];
+    for (const [draftId, draftThread] of Object.entries(state.draftThreadsByThreadKey)) {
+      const ref =
+        draftThread.promotedTo ?? scopeThreadRef(draftThread.environmentId, draftThread.threadId);
+      const threadKey = scopedThreadKey(ref);
+      if (!threadKeys.has(threadKey)) continue;
+      if (!draftThread.promotedTo) {
+        arrived.push([DraftId.make(draftId), ref]);
+        continue;
+      }
+      const target = resolveDraftPromotionNavigationTarget({
+        serverThreadRef: ref,
+        serverThread: get(input.threadShellAtom(ref)),
+        backgroundSubmissionPending: state.backgroundSubmissionThreadKeys[threadKey] === true,
+      });
+      if (target) owned.push([DraftId.make(draftId), target]);
+    }
+    return { arrived, owned };
+  });
+  let disposed = false;
+  const finalizing = new Set<DraftId>();
+  const unsubscribeMilestones = input.registry.subscribe(
+    milestonesAtom,
+    ({ arrived, owned }) => {
+      const store = composerDraftStore.getState();
+      for (const [draftId, ref] of arrived) {
+        store.markDraftThreadPromoting(draftId, ref);
+      }
+      for (const [draftId, ref] of owned) {
+        if (finalizing.has(draftId)) continue;
+        finalizing.add(draftId);
+        void waitForDraftHeroTransition().then(() => {
+          finalizing.delete(draftId);
+          if (disposed) return;
+          const current = composerDraftStore.getState().draftThreadsByThreadKey[draftId];
+          if (!current || !scopedThreadRefsEqual(current.promotedTo, ref)) return;
+          finalizePromotedDraftThreadByRef(ref);
+        });
+      }
+    },
+    { immediate: true },
+  );
+  return () => {
+    disposed = true;
+    unsubscribeMilestones();
+    unsubscribeDrafts();
+  };
 }
