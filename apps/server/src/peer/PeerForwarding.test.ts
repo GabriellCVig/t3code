@@ -104,7 +104,13 @@ const boxThreads = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) => {
     shellOf(threadId).pipe(
       Effect.map(
         (thread) =>
-          ({ thread, runs: [run("running")], runtimeRequests: [], providerTurns: [] }) as never,
+          ({
+            thread,
+            runs: [run("running")],
+            runtimeRequests: [],
+            providerTurns: [],
+            turnItems: [],
+          }) as never,
       ),
     );
   return Layer.mock(ThreadManagement.ThreadManagementService)({

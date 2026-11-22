@@ -1,3 +1,7 @@
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
@@ -534,6 +538,156 @@ it.effect("leaves a task delegated from a linked environment out of the top-leve
     );
   }).pipe(Effect.provide(harness.layer));
 });
+it.effect(
+  "persists worker controls for a fresh thread and scopes a delegation to its child",
+  () => {
+    const harness = makeHarness({ adapters: [claudeAdapter] });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const workerControls = { agent: "parent", env: { GCV_OWNER: "parent" } };
+      const parent = yield* launches.launch({
+        ...launchInput({ command: "launch-worker", thread: "parent-worker" }),
+        modelSelection: claudeModelSelection,
+        workerControls,
+      });
+      const { thread, runs } = yield* threads
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("start-worker"),
+          threadId: parent.threadId,
+          messageId: MessageId.make("worker-message"),
+          text: "Inspect",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        })
+        .pipe(Effect.andThen(threads.getThreadProjection(parent.threadId)));
+      assert.deepEqual(thread.workerControls, workerControls);
+      const run = runs[0]!;
+      for (const controls of [undefined, { agent: "reader", maxTurns: 2 }]) {
+        const result = yield* threads.dispatch({
+          type: "delegated_task.request",
+          commandId: CommandId.make(`delegate-${controls?.agent ?? "default"}`),
+          parentThreadId: parent.threadId,
+          parentRunId: run.id,
+          parentNodeId: run.rootNodeId!,
+          task: "Read",
+          modelSelection: claudeModelSelection,
+          workerControls: controls,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        const childThread = result.storedEvents.find(
+          ({ event }) => event.type === "thread.created",
+        )!.event.threadId;
+        assert.deepEqual(
+          (yield* threads.getThreadProjection(childThread)).thread.workerControls,
+          controls,
+        );
+      }
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("rejects switching a Claude worker to a non-Claude provider", () => {
+  const harness = makeHarness({ adapters: [claudeAdapter, adapter] });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const { threadId } = yield* launches.launch({
+      ...launchInput({ command: "create-worker", thread: "worker" }),
+      modelSelection: claudeModelSelection,
+      workerControls: {},
+    });
+    for (const type of [
+      "thread.model-selection.set",
+      "provider.switch",
+      "message.dispatch",
+    ] as const) {
+      const common = { commandId: CommandId.make(type), threadId, modelSelection };
+      const error = yield* threads
+        .dispatch(
+          type === "message.dispatch"
+            ? {
+                ...common,
+                type,
+                messageId: MessageId.make("worker-message"),
+                text: "Inspect",
+                attachments: [],
+                dispatchMode: { type: "queue_after_active" },
+                createdBy: "user",
+                creationSource: "web",
+              }
+            : { ...common, type },
+        )
+        .pipe(Effect.flip);
+      assert.include(error, {
+        _tag: "OrchestratorCommandRejectedError",
+        cause: "Worker controls require a Claude provider.",
+      });
+    }
+    const projection = yield* threads.getThreadProjection(threadId);
+    assert.deepEqual(projection.thread.modelSelection, claudeModelSelection);
+    assert.isEmpty(projection.runs);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect(
+  "t3_thread_launch releases claimed uploads when the provider rejects worker controls",
+  () => {
+    const dependencies = Layer.mergeAll(
+      makeHarness().layer,
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("test"),
+        requestNamespace: "client:worker-controls",
+        client: { sessionId: "test", label: "test", access: "full-access" },
+        thread: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-worker-claims-" }).pipe(
+        Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+      ),
+    );
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { attachmentsDir } = yield* ServerConfig.ServerConfig;
+      const attachment = {
+        type: "image" as const,
+        id: ChatAttachmentId.make(createPendingAttachmentId()!),
+        name: "image.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      const pendingPath = resolveAttachmentPath({ attachmentsDir, attachment })!;
+      yield* fs.makeDirectory(attachmentsDir, { recursive: true });
+      yield* fs.writeFile(pendingPath, new Uint8Array([1, 2, 3, 4]));
+      const filesBefore = yield* fs.readDirectory(attachmentsDir);
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer)),
+      );
+      const result = yield* toolkit
+        .handle("t3_thread_launch", {
+          projectId,
+          title: "Invalid worker",
+          workerControls: { agent: "reader" },
+          attachments: [attachment],
+        })
+        .pipe(Stream.unwrap, Stream.runCollect);
+      assert.include(result.at(-1)?.result, {
+        code: "invalid_request",
+        message: "Worker controls require a Claude provider.",
+      });
+      assert.deepEqual(yield* fs.readDirectory(attachmentsDir), filesBefore);
+      assert.deepEqual(yield* fs.readFile(pendingPath), new Uint8Array([1, 2, 3, 4]));
+    }).pipe(Effect.provide(dependencies.pipe(Layer.provideMerge(NodeCrypto.layer))));
+  },
+);
 
 it.effect("runs a thread-bound automation on the provider the thread uses now", () => {
   const harness = makeHarness({ adapters: [adapter, claudeAdapter] });
@@ -2884,6 +3038,8 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     yield* fs.writeFile(filePath, new Uint8Array([5, 6, 7, 8]));
     const edit = dispatchIntakeCommand({
       type: "queued-run.edit",
+      createdBy: "user",
+      creationSource: "web",
       commandId: CommandId.make("intake-edit"),
       threadId: input.threadId,
       runId: queuedRun.id,
@@ -2910,6 +3066,8 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     const beforeRejectedEdit = (yield* claimedFiles).length;
     const rejectedEdit = yield* dispatchIntakeCommand({
       type: "queued-run.edit",
+      createdBy: "user",
+      creationSource: "web",
       commandId: CommandId.make("intake-edit-rejected"),
       threadId: input.threadId,
       runId: queuedRun.id,

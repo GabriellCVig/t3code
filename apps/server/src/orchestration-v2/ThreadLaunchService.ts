@@ -5,6 +5,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
   type ChatAttachment,
+  type ClaudeWorkerControls,
   type MessageId,
   type ModelSelection,
   type OrchestrationV2Actor,
@@ -105,6 +106,7 @@ export interface ThreadLaunchInput {
   readonly generateTitle?: boolean;
   /** The caller chose `title`, so a first message keeps it. */
   readonly titleRenamed?: boolean;
+  readonly workerControls?: ClaudeWorkerControls;
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
@@ -1353,6 +1355,13 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
+      if (input.reuseExistingThread === true && input.workerControls !== undefined) {
+        return yield* mapError(
+          input,
+          "update-thread",
+          input.threadId,
+        )("Worker controls can only be set when creating a thread.");
+      }
       if (input.reuseExistingThread === true && input.threadId === undefined) {
         return yield* mapError(
           input,
@@ -1462,6 +1471,9 @@ const make = Effect.gen(function* () {
                 title: input.title,
                 ...(input.titleRenamed === true ? { titleRenamed: true } : {}),
                 modelSelection: input.modelSelection,
+                ...(input.workerControls === undefined
+                  ? {}
+                  : { workerControls: input.workerControls }),
                 runtimeMode: input.runtimeMode,
                 interactionMode: input.interactionMode,
                 branch: initialBranch,

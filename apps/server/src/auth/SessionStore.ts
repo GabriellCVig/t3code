@@ -65,6 +65,7 @@ export interface VerifiedSession {
   readonly runtimeModeCeiling?: RuntimeMode;
   /** An MCP client that is another T3 Code environment's peer link. */
   readonly peerLink?: true;
+  readonly creationSource?: "cli";
 }
 
 export interface VerifiedWebSocketTicket extends VerifiedSession {
@@ -412,6 +413,7 @@ export class SessionStore extends Context.Service<
       readonly proofKeyThumbprint?: string;
       readonly runtimeModeCeiling?: RuntimeMode;
       readonly peerLink?: boolean;
+      readonly creationSource?: "cli";
       readonly replaceActiveForSubjectAndMethod?: boolean;
       readonly replaceSessionId?: AuthSessionId;
       /** Keeps the session alive this long past each renewal; `ttl` then bounds only the token. */
@@ -505,6 +507,7 @@ const SessionClaims = Schema.Struct({
   plk: Schema.optionalKey(Schema.Literal(1)),
   /** Signed, so only sessions issued as renewable can renew. */
   rnw: Schema.optionalKey(Schema.Literal(1)),
+  creationSource: Schema.optionalKey(Schema.Literal("cli")),
   iat: Schema.Number,
   exp: Schema.Number,
 });
@@ -746,6 +749,7 @@ const make = Effect.gen(function* () {
         scopes: input?.scopes ?? AuthStandardClientScopes,
         method: input?.method ?? "browser-session-cookie",
         ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
+        ...(input?.creationSource ? { creationSource: input.creationSource } : {}),
         ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
         ...(input?.peerLink === true ? { plk: 1 as const } : {}),
         ...(input?.renewalWindow ? { rnw: 1 as const } : {}),
@@ -929,6 +933,7 @@ const make = Effect.gen(function* () {
         subject: claims.sub,
         scopes: row.value.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+        ...(claims.creationSource ? { creationSource: claims.creationSource } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
         ...(claims.plk === 1 ? { peerLink: true as const } : {}),
       } satisfies VerifiedSession;

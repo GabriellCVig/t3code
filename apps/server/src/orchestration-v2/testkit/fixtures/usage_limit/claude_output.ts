@@ -15,7 +15,7 @@ export function claudeUsageLimitFailure(
   );
   if (error?.type !== "error") throw new Error("expected an error turn item");
   assert.equal(error.failure.class, "usage_limit");
-  assert.equal(error.failure.code, "api_error_429");
+  assert.equal(error.failure.code, "usage_limit");
   return error.failure;
 }
 

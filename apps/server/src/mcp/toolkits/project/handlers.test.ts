@@ -213,6 +213,11 @@ it.effect(
           readonly generateTitle?: boolean;
           readonly message?: string;
           readonly runtimeMode?: RuntimeMode;
+          readonly workerControls?: {
+            allowedTools: string[];
+            maxTurns: number;
+            exposeT3Mcp: boolean;
+          };
           readonly targeted?: false;
           readonly overrideModel?: ModelSelection;
           readonly hostedAppUrl?: string;
@@ -245,11 +250,17 @@ it.effect(
       const belowCeiling = yield* launchWith("full-access", "approval-required", {
         title: "Fix",
         message: "Fix the bug",
+        workerControls: { allowedTools: ["Read"], maxTurns: 2, exposeT3Mcp: false },
       });
       expect(belowCeiling.result).toMatchObject({
         projectId: belowCeiling.projectId,
         modelSelection: belowCeiling.modelSelection,
         link: `[Fix](t3-thread://v2/environment/${belowCeiling.launched[0]?.threadId})`,
+      });
+      expect(belowCeiling.launched[0]?.workerControls).toEqual({
+        allowedTools: ["Read"],
+        maxTurns: 2,
+        exposeT3Mcp: false,
       });
       expect(belowCeiling.launched[0]?.runtimeMode).toBe("approval-required");
       expect(belowCeiling.launched[0]?.initialMessage?.senderThreadId).toBeUndefined();

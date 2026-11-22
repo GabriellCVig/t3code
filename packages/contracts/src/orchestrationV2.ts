@@ -95,12 +95,48 @@ export type OrchestrationV2Actor = typeof OrchestrationV2Actor.Type;
 
 export const OrchestrationV2CreationSource = Schema.Literals([
   "web",
+  "desktop",
   "mobile",
+  "cli",
+  "scheduled",
   "mcp",
   "provider",
   "server",
 ]);
 export type OrchestrationV2CreationSource = typeof OrchestrationV2CreationSource.Type;
+
+/**
+ * Who a turn came from, derived from its message's server-assigned creation
+ * source. Provider hooks read it as `T3CODE_TURN_SOURCE`; message text can
+ * never set it.
+ */
+export const OrchestrationV2TurnSource = Schema.Literals([
+  "human",
+  "agent",
+  "cli",
+  "scheduled",
+  "system",
+]);
+export type OrchestrationV2TurnSource = typeof OrchestrationV2TurnSource.Type;
+
+export function turnSourceForCreationSource(
+  creationSource: OrchestrationV2CreationSource,
+): OrchestrationV2TurnSource {
+  switch (creationSource) {
+    case "cli":
+    case "scheduled":
+      return creationSource;
+    case "web":
+    case "desktop":
+    case "mobile":
+      return "human";
+    case "mcp":
+      return "agent";
+    case "provider":
+    case "server":
+      return "system";
+  }
+}
 
 export const OrchestrationV2ThreadHistoryOrigin = Schema.Literals(["native", "v1_import"]);
 export type OrchestrationV2ThreadHistoryOrigin = typeof OrchestrationV2ThreadHistoryOrigin.Type;
@@ -471,6 +507,59 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   requestId: CommandId,
   completedAt: Schema.DateTimeUtc,
 });
+const claudeWorkerEnvKeys = [
+  "GCV_OWNER",
+  "TMPDIR",
+  "GCV_T3_WORKER",
+  "GCV_HOLDER_GEN",
+  "GCV_STREAM",
+  "CLAUDE_CODE_PROMPT_CACHE_TTL",
+];
+export const ClaudeWorkerControls = Schema.Struct({
+  agent: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/)),
+  ),
+  maxTurns: Schema.optional(PositiveInt),
+  allowedTools: Schema.optional(
+    Schema.Array(
+      TrimmedNonEmptyString.check(
+        Schema.isPattern(/^[A-Za-z][A-Za-z0-9_]*$/, {
+          expected: "a built-in Claude tool name",
+        }),
+        Schema.makeFilter(
+          (tool) =>
+            (tool !== "default" && !tool.startsWith("mcp__")) ||
+            "Expected a built-in Claude tool name.",
+        ),
+      ),
+    ),
+  ).annotate({
+    description: "Exact set of built-in tools. An explicit list disables MCP tools.",
+  }),
+  disallowedTools: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  exposeT3Mcp: Schema.optional(Schema.Boolean),
+  env: Schema.optional(
+    Schema.Record(Schema.String, Schema.String).check(
+      Schema.makeFilter(
+        (env) => {
+          const invalid = Object.keys(env).find((key) => !claudeWorkerEnvKeys.includes(key));
+          return invalid === undefined || `Unsupported Claude worker environment key: ${invalid}`;
+        },
+        { description: `Allowed environment keys: ${claudeWorkerEnvKeys.join(", ")}` },
+      ),
+    ),
+  ),
+})
+  .check(
+    Schema.makeFilter(
+      (controls) =>
+        controls.allowedTools === undefined ||
+        controls.exposeT3Mcp !== true ||
+        "An explicit allowedTools list disables MCP tools.",
+    ),
+  )
+  .annotate({ description: "Execution controls for a new Claude worker thread." });
+export type ClaudeWorkerControls = typeof ClaudeWorkerControls.Type;
 
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
@@ -479,6 +568,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   title: TrimmedNonEmptyString,
   providerInstanceId: ProviderInstanceId,
   modelSelection: ModelSelection,
+  workerControls: Schema.optional(ClaudeWorkerControls),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
@@ -3254,6 +3344,7 @@ export const OrchestrationV2Command = Schema.Union([
     title: TrimmedNonEmptyString,
     titleRenamed: Schema.optional(Schema.Boolean),
     modelSelection: ModelSelection,
+    workerControls: Schema.optional(ClaudeWorkerControls),
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
     branch: Schema.NullOr(TrimmedNonEmptyString),
@@ -3657,6 +3748,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("queued-run.edit"),
+    createdBy: Schema.optional(OrchestrationV2Actor),
+    creationSource: Schema.optional(OrchestrationV2CreationSource),
     context: Schema.optional(OrchestrationMessageContext),
     commandId: CommandId,
     threadId: ThreadId,
@@ -3667,6 +3760,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("runtime-request.respond"),
+    createdBy: Schema.optional(OrchestrationV2Actor),
+    creationSource: Schema.optional(OrchestrationV2CreationSource),
     commandId: CommandId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,
@@ -3719,6 +3814,7 @@ export const OrchestrationV2Command = Schema.Union([
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
     modelSelection: ModelSelection,
+    workerControls: Schema.optional(ClaudeWorkerControls),
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
     workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
@@ -4091,6 +4187,7 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   title: TrimmedNonEmptyString,
   generateTitle: Schema.optional(Schema.Boolean),
   modelSelection: ModelSelection,
+  workerControls: Schema.optional(ClaudeWorkerControls),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,

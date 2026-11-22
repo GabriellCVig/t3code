@@ -143,6 +143,7 @@ without a sign-in:
 ```sh
 id=$(t3 thread start . "Find why the tests are slow")
 t3 thread send "$id" "Now fix it" --wait
+t3 thread status "$id" --json
 t3 thread show "$id"
 t3 thread list
 ```
@@ -150,7 +151,8 @@ t3 thread list
 `.` means the project that contains the current folder, or a git worktree of
 its repository; a project id also works. A new thread uses the project's
 default model and permission mode, and runs in the project folder unless you
-pass `--worktree <base-branch>`. Its title is the message's first line, or
+pass `--worktree <base-branch>` to create a checkout or `--worktree-path <path>`
+to use an existing project worktree. Its title is the message's first line, or
 `--title`; add `--generate-title` to have it named from the message, as threads
 started in the app are. `send` never interrupts: a busy thread gets the message
 as its next turn. Pass `-` as the message to read it from stdin.
@@ -160,9 +162,24 @@ To choose the model, pass `--provider <instance-id> --model <slug>`. Add
 Option ids and values depend on the model; `true` and `false` set on/off
 options.
 
+`status --json` reports pending requests, active child agents, and the provider
+instance and reset time for a usage-limit failure. Checking status leaves child
+results available to their parent. Use `show --json` to read messages with their
+author and creation source.
+
 `--wait` prints the agent's reply. It exits 1 when the run fails or stops, and
 2 when the agent waits for an answer you give in the app. Add `--json` for a
 result that always includes the thread id.
+
+Use `t3 thread archive <thread>` to archive a thread and add `--unarchive` to
+restore it. Use `t3 thread interrupt <thread>` to interrupt its newest running turn.
+Pass `--run <runId>` to target a specific run and `--reason <text>` to record why.
+Use `--stop` to stop the thread, its watches and its delegated tasks. This takes
+precedence over `--run`.
+
+Both `start` and `send` forward `--client-request-id <id>`. The server scopes the
+id to a single credential session. Each CLI invocation opens a fresh session, so
+retrying either command can create a second thread or deliver a second message.
 
 ## Remove an agent
 

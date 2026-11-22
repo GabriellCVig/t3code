@@ -36,10 +36,12 @@ import { secretRequestPageUrl } from "./secretRequest.ts";
 import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { LastThreadTitleRegeneration, ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
+  ClaudeWorkerControls,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
+  OrchestrationV2RuntimeRequest,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
@@ -170,6 +172,7 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt,
+  workerControls: Schema.optional(ClaudeWorkerControls),
   // Some providers send the whole target object as JSON text.
   target: Schema.optional(
     Schema.Union([OrchestratorMcpTarget, Schema.fromJsonString(OrchestratorMcpTarget)]),
@@ -177,11 +180,14 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
-    Schema.Literals(["shared", "worktree"]).annotate({
+    Schema.Literals(["shared", "worktree", "existing_worktree"]).annotate({
       description:
-        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out. 'existing_worktree': use the project checkout at worktreePath.",
     }),
   ),
+  worktreePath: Schema.optional(TrimmedNonEmptyString).annotate({
+    description: "Required for 'existing_worktree' isolation. Rejected for other isolation modes.",
+  }),
   mode: Schema.optional(
     Schema.Literals(["async", "wait"]).annotate({
       description:
@@ -459,6 +465,22 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
 });
 export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInput.Type;
 
+/** The thread's latest executed run failed on a provider usage limit; later runs are held. */
+export const OrchestratorMcpThreadUsageLimit = Schema.Struct({
+  rateLimited: Schema.Literal(true),
+  resetsAt: Schema.NullOr(IsoDateTime),
+  instanceId: ProviderInstanceId,
+  detail: Schema.NullOr(Schema.String),
+});
+export type OrchestratorMcpThreadUsageLimit = typeof OrchestratorMcpThreadUsageLimit.Type;
+
+export const OrchestratorMcpThreadPendingRequest = Schema.Struct({
+  requestId: RuntimeRequestId,
+  kind: OrchestrationV2RuntimeRequest.fields.kind,
+  blocking: Schema.optional(Schema.Boolean),
+});
+export type OrchestratorMcpThreadPendingRequest = typeof OrchestratorMcpThreadPendingRequest.Type;
+
 export const OrchestratorMcpThreadDetail = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -468,6 +490,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
+  latestRunStatus: Schema.optional(Schema.NullOr(OrchestrationV2RunStatus)),
   activeRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
@@ -489,6 +512,9 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,
+  /** Omitted when empty and from older servers. */
+  pendingRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPendingRequest)),
+  usageLimit: Schema.optional(Schema.NullOr(OrchestratorMcpThreadUsageLimit)),
   archived: Schema.Boolean,
   settled: Schema.Boolean,
   settledAt: Schema.NullOr(IsoDateTime),
@@ -709,6 +735,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   providers: Schema.Array(OrchestratorMcpProviderCapability),
   features: Schema.Struct({
+    workerControls: Schema.optional(Schema.Literal(true)),
     appOwnedSubagents: Schema.Boolean,
     asyncPolling: Schema.Boolean,
     cancellation: Schema.Boolean,

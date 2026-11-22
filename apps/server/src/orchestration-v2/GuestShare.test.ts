@@ -248,6 +248,8 @@ it.effect("keeps a queued guest message unchanged when the owner tries to edit i
 
     const edit = orchestrator.dispatch({
       type: "queued-run.edit",
+      createdBy: "user",
+      creationSource: "web",
       commandId: CommandId.make("edit"),
       threadId,
       runId: queued.id,

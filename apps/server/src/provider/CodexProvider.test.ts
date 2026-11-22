@@ -145,6 +145,17 @@ it.effect("reuses one Codex skills helper per launch until it idles out", () =>
   }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
 );
 
+const contextWindow = {
+  id: "contextWindow",
+  label: "Context window",
+  type: "select",
+  options: [
+    { id: "default", label: "Default", isDefault: true },
+    { id: "1m", label: "1M tokens" },
+  ],
+  currentValue: "default",
+} as const;
+
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
     additionalSpeedTiers: [],
@@ -215,6 +226,7 @@ it("maps current Codex model capability fields", () => {
       ],
       currentValue: "standard",
     },
+    contextWindow,
   ]);
 });
 
@@ -264,6 +276,7 @@ it("uses standard routing when the catalog has no default service tier", () => {
       ],
       currentValue: "default",
     },
+    contextWindow,
   ]);
 });
 

@@ -354,6 +354,15 @@ const make = Effect.gen(function* () {
           modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
           ...(runtimeMode === undefined ? {} : { runtimeMode }),
           ...(interactionMode === undefined ? {} : { interactionMode }),
+          ...(input.worktreePath === undefined
+            ? {}
+            : {
+                workspaceStrategy: {
+                  type: "existing_worktree" as const,
+                  worktreePath: input.worktreePath,
+                },
+              }),
+          ...(input.workerControls === undefined ? {} : { workerControls: input.workerControls }),
           message: task,
           clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
           // The thread there shows it is this thread's subagent, with a way back.

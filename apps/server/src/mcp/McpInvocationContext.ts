@@ -36,6 +36,7 @@ export interface McpThreadCaller {
 }
 
 export interface McpClientCaller {
+  readonly creationSource?: "cli" | "mcp";
   readonly sessionId: string;
   readonly label: string;
   readonly access: AuthMcpClientAccess;

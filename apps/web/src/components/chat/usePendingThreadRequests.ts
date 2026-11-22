@@ -27,6 +27,7 @@ import {
   type DraftId,
   useComposerDraftStore,
 } from "../../composerDraftStore";
+import { isElectron } from "../../env";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   getUploadedAttachments,
@@ -370,6 +371,7 @@ export function usePendingThreadRequests(input: {
     const result = await respondToThreadApproval({
       environmentId,
       input: {
+        creationSource: isElectron ? "desktop" : "web",
         threadId: activeThreadId,
         requestId,
         decision,
@@ -473,6 +475,7 @@ export function usePendingThreadRequests(input: {
       const result = await respondToThreadUserInput({
         environmentId,
         input: {
+          creationSource: isElectron ? "desktop" : "web",
           threadId: activeThreadId,
           requestId,
           answers: providerAnswers,

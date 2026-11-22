@@ -37,6 +37,7 @@ import {
   type OrchestratorMcpListScheduledTasksInput,
   type ProjectId,
   type OrchestratorMcpThreadDetail,
+  type OrchestratorMcpThreadUsageLimit,
   type OrchestratorMcpThreadInterruptInput,
   type OrchestratorMcpThreadInterruptResult,
   type OrchestratorMcpThreadListInput,
@@ -54,6 +55,7 @@ import {
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
   ProviderRequestKind,
+  RuntimeRequestId,
   type RuntimeMode,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
@@ -68,7 +70,7 @@ import {
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import { latestExecutedRun, runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { threadPullRequestUpdatedAtMs } from "@t3tools/shared/threadPullRequests";
@@ -83,6 +85,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import type * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -114,6 +117,7 @@ import {
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { placeholderThreadTitle } from "../orchestration-v2/placeholderThreadTitle.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import { assertProjectWorktree } from "./projectWorktree.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
@@ -164,6 +168,7 @@ const THREAD_PULL_REQUEST_PREVIEW_LIMIT = 5;
 const THREAD_READ_RESULT_MAX_BYTES = 30_000;
 
 interface ResolvedTarget {
+  readonly driver: ServerProvider["driver"];
   readonly modelSelection: ModelSelection;
   readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined;
 }
@@ -185,6 +190,7 @@ export interface OrchestratorMcpServiceShape {
   readonly taskStatus: (
     scope: McpInvocationScope,
     taskId: NodeId,
+    options?: { readonly acknowledgeTerminal: boolean },
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
   readonly cancelTask: (
     scope: McpInvocationScope,
@@ -1025,17 +1031,80 @@ function listItemFromShell(
   };
 }
 
+/**
+ * Structured usage-limit hold, read from the shell's error summary so a
+ * supervisor can tell a held turn from a silent one without parsing text.
+ */
+export function threadUsageLimit(
+  shell: Pick<
+    OrchestrationV2ThreadShell,
+    "lastErrorClass" | "lastErrorCode" | "usageLimitResetAt" | "lastError" | "latestRunId"
+  >,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+): OrchestratorMcpThreadUsageLimit | null {
+  if (
+    shell.lastErrorClass !== "usage_limit" ||
+    (shell.lastErrorCode === "api_error_429" && shell.usageLimitResetAt == null)
+  )
+    return null;
+  const limited = latestExecutedRun(runs);
+  if (limited?.status !== "failed" || limited.id !== shell.latestRunId) return null;
+  return {
+    rateLimited: true,
+    resetsAt: shell.usageLimitResetAt ?? null,
+    instanceId: limited.providerInstanceId,
+    detail: shell.lastError ?? null,
+  };
+}
+
 function threadDetail(
   scope: McpInvocationScope,
-  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "runtimeRequests">,
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "runtimeRequests" | "turnItems"
+  >,
   runCount: number,
   itemCount: number,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
   firstPage: boolean,
 ): OrchestratorMcpThreadDetail {
-  const latest = ThreadManagementService.latestRun(projection);
+  const latest = ThreadManagementService.latestRun({
+    runs: projection.runs.filter((run) => run.status !== "queued" || !run.queueHeld),
+  });
   const active = ThreadManagementService.latestActiveRun(projection);
+  const pendingRequests = projection.runtimeRequests
+    .filter((request) => request.status === "pending")
+    .map((request) => ({
+      requestId: request.id,
+      kind: request.kind,
+      blocking: request.responseCapability.type !== "message",
+    }));
+  const liveRuns = new Set(
+    projection.runs.filter(ThreadManagementService.isActiveRun).map((run) => run.id),
+  );
+  for (const item of projection.turnItems) {
+    if (
+      item.type === "secret_request" &&
+      item.status === "waiting" &&
+      item.runId !== null &&
+      liveRuns.has(item.runId)
+    ) {
+      pendingRequests.push({
+        requestId: RuntimeRequestId.make(item.id),
+        kind: "user_input",
+        blocking: true,
+      });
+    }
+  }
+  const pending = shell.pendingRuntimeRequest;
+  if (pending && !pendingRequests.some((request) => request.requestId === pending.id)) {
+    pendingRequests.push({
+      requestId: pending.id,
+      kind: pending.kind,
+      blocking: pending.blocking !== false,
+    });
+  }
   return {
     threadId: projection.thread.id,
     projectId: projection.thread.projectId,
@@ -1045,6 +1114,7 @@ function threadDetail(
     creationSource: projection.thread.creationSource,
     status: threadStatus(active?.status, latest?.status ?? "idle", shell.pendingBackgroundTasks),
     latestRunId: latest?.id ?? null,
+    latestRunStatus: latest?.status ?? null,
     activeRunId: active?.id ?? null,
     providerInstanceId: projection.thread.modelSelection.instanceId,
     model: projection.thread.modelSelection.model,
@@ -1076,9 +1146,9 @@ function threadDetail(
       : { delegatedFrom: projection.thread.delegatedFrom }),
     runCount,
     itemCount,
-    pendingRequestCount: projection.runtimeRequests.filter(
-      (request) => request.status === "pending",
-    ).length,
+    pendingRequestCount: pendingRequests.length,
+    ...(pendingRequests.length === 0 ? {} : { pendingRequests }),
+    usageLimit: threadUsageLimit(shell, projection.runs),
     archived: projection.thread.archivedAt !== null,
     ...threadSettlement(projection.thread),
     ...threadSnooze(shell, nowMs),
@@ -1321,6 +1391,9 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+  const worktreeContext = yield* Effect.context<
+    FileSystem.FileSystem | GitVcsDriver.GitVcsDriver
+  >();
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
 
@@ -1563,24 +1636,33 @@ const make = Effect.gen(function* () {
       shell.lineage.relationshipToParent === "subagent"
     ) {
       const target = yield* threadManagement
-        .getProjectThreadRecords(input, [
-          "runs",
-          "providerTurns",
-          "runtimeRequests",
-          "contextTransfers",
-        ])
+        .getProjectThreadRecords(
+          input,
+          ["runs", "providerTurns", "runtimeRequests", "contextTransfers", "turnItems"],
+          { turnItemTypes: ["secret_request"], turnItemStatuses: ["waiting"] },
+        )
         .pipe(Effect.mapError(threadManagementFailure));
       return { parent, target, shell, runCount: target.runs.length } as const;
     }
     // Long threads hold thousands of runs; the read shows only the recent and active ones.
-    const [records, runCount] = yield* Effect.all([
-      threadManagement.getProjectThreadRecords(input, ["runs", "runtimeRequests"], {
+    let [records, runCount] = yield* Effect.all([
+      threadManagement.getProjectThreadRecords(input, ["runs", "runtimeRequests", "turnItems"], {
+        turnItemTypes: ["secret_request"],
+        turnItemStatuses: ["waiting"],
         latestRunLimit: runLimit,
         runStatuses: ThreadManagementService.ACTIVE_RUN_STATUSES,
         runtimeRequestStatuses: ["pending"],
       }),
       threadManagement.getRunCount(threadId),
     ]).pipe(Effect.mapError(threadManagementFailure));
+    if (shell.latestRunId != null && !records.runs.some((run) => run.id === shell.latestRunId)) {
+      const { runs } = yield* threadManagement
+        .getProjectThreadRecords(input, ["runs"], {
+          runIds: [shell.latestRunId],
+        })
+        .pipe(Effect.mapError(threadManagementFailure));
+      records = { ...records, runs: [...records.runs, ...runs] };
+    }
     const { providerTurns } = yield* threadManagement
       .getProjectThreadRecords(input, ["providerTurns"], {
         providerTurnAttemptIds: records.runs.flatMap((run) => run.activeAttemptId ?? []),
@@ -1799,6 +1881,7 @@ const make = Effect.gen(function* () {
     return {
       modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
       supportedRuntimeModes: provider.supportedRuntimeModes,
+      driver: provider.driver,
     };
   });
 
@@ -2411,7 +2494,7 @@ const make = Effect.gen(function* () {
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         createdBy: "agent",
-        creationSource: "mcp",
+        creationSource: scope.client?.creationSource ?? "mcp",
         // Scope the idempotency key by provider session so two callers
         // reusing the same clientRequestId cannot collide on one task row.
         ...(input.clientRequestId === undefined
@@ -2811,6 +2894,7 @@ const make = Effect.gen(function* () {
           };
         }),
         features: {
+          workerControls: true,
           appOwnedSubagents: true,
           asyncPolling: true,
           cancellation: true,
@@ -2823,6 +2907,18 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      if (input.isolation === "existing_worktree" && input.worktreePath === undefined) {
+        return yield* failure(
+          "invalid_request",
+          'Isolation "existing_worktree" requires worktreePath.',
+        );
+      }
+      if (input.isolation !== "existing_worktree" && input.worktreePath !== undefined) {
+        return yield* failure(
+          "invalid_request",
+          'worktreePath requires isolation "existing_worktree".',
+        );
+      }
       const environmentId =
         input.target === undefined
           ? undefined
@@ -2877,6 +2973,9 @@ const make = Effect.gen(function* () {
         cwd: yield* parentWorkspaceCwd(parent),
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
+      if (input.workerControls !== undefined && target.driver !== "claudeAgent") {
+        return yield* failure("invalid_request", "Worker controls require a Claude provider.");
+      }
       const runtimeMode = yield* resolveRuntimeMode(
         parent.thread.runtimeMode,
         input.runtimeMode,
@@ -2887,7 +2986,13 @@ const make = Effect.gen(function* () {
         input.interactionMode,
       );
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
-      if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
+      if (input.worktreePath !== undefined && !isRetryOfAcceptedDelegation) {
+        const project = yield* requireProject(parent.thread.projectId);
+        yield* assertProjectWorktree(project.workspaceRoot, input.worktreePath).pipe(
+          Effect.provideContext(worktreeContext),
+        );
+        workspaceStrategy = { type: "existing_worktree", worktreePath: input.worktreePath };
+      } else if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
         const project = yield* requireProject(parent.thread.projectId);
         const base = yield* gitDriver
           .resolveCommit({
@@ -2934,6 +3039,7 @@ const make = Effect.gen(function* () {
               parentRunId: parentRun.id,
               parentNodeId,
               task: taskPrompt(input),
+              workerControls: input.workerControls,
               ...(input.title === undefined ? {} : { title: input.title }),
               modelSelection: target.modelSelection,
               runtimeMode,
@@ -2988,10 +3094,12 @@ const make = Effect.gen(function* () {
         }),
       );
     }),
-    taskStatus: Effect.fn("OrchestratorMcpService.taskStatus")(function* (callerScope, taskId) {
-      const scope = yield* requireThreadScope(callerScope, "task_status");
-      return yield* readTask(scope, taskId, false, true);
-    }),
+    taskStatus: Effect.fn("OrchestratorMcpService.taskStatus")(
+      function* (callerScope, taskId, options) {
+        const scope = yield* requireThreadScope(callerScope, "task_status");
+        return yield* readTask(scope, taskId, false, options?.acknowledgeTerminal ?? true);
+      },
+    ),
     cancelTask: Effect.fn("OrchestratorMcpService.cancelTask")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "task_cancel");
       const current = yield* readTask(scope, input.taskId);
@@ -3675,7 +3783,7 @@ const make = Effect.gen(function* () {
           ...(input.freshContext ? { freshContext: true } : {}),
           ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
           createdBy: "agent",
-          creationSource: "mcp",
+          creationSource: scope.client?.creationSource ?? "mcp",
         })
         .pipe(
           Effect.mapError((error) =>
@@ -3850,6 +3958,7 @@ export const layer: Layer.Layer<
   OrchestratorMcpService,
   never,
   | SecureRandom.SecureRandom
+  | FileSystem.FileSystem
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver

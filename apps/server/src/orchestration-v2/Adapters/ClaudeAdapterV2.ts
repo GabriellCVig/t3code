@@ -122,6 +122,7 @@ import {
   type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2WorkflowRunHandles,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2TurnSource,
   type OrchestrationV2WebSearchResult,
   type ProviderApprovalDecision,
   type ProviderApprovalFullAccessOverride,
@@ -136,6 +137,7 @@ import {
   type ThreadId,
   resolveIdleCompaction,
   isDelegatedAppThread,
+  turnSourceForCreationSource,
 } from "@t3tools/contracts";
 
 import { FILE_HEADERS_ONLY, formatPatch, structuredPatch } from "diff";
@@ -688,7 +690,7 @@ type ClaudeAgentSdkThreadIdentity =
 
 export type ClaudeAgentSdkQueryOptions = Omit<
   ClaudeQueryOptions,
-  "maxTurns" | "model" | "permissionMode" | "resume" | "sessionId" | "tools"
+  "model" | "permissionMode" | "resume" | "sessionId" | "tools"
 > & {
   readonly model: string;
   readonly tools: NonNullable<ClaudeQueryOptions["tools"]>;
@@ -1145,6 +1147,9 @@ export interface ClaudeAgentSdkLoggedQueryOptions {
   readonly effort?: ClaudeAgentSdkQueryOptions["effort"];
   readonly includePartialMessages?: true;
   readonly pathToClaudeCodeExecutable?: ClaudeAgentSdkQueryOptions["pathToClaudeCodeExecutable"];
+  readonly agent?: ClaudeAgentSdkQueryOptions["agent"];
+  readonly maxTurns?: ClaudeAgentSdkQueryOptions["maxTurns"];
+  readonly strictMcpConfig?: ClaudeAgentSdkQueryOptions["strictMcpConfig"];
   readonly hasExtraArgs?: true;
   readonly allowDangerouslySkipPermissions?: true;
   readonly hasCanUseTool?: true;
@@ -1297,6 +1302,9 @@ export function loggedClaudeQueryOptions(
     ...(options.pathToClaudeCodeExecutable === undefined
       ? {}
       : { pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable }),
+    ...(options.agent === undefined ? {} : { agent: options.agent }),
+    ...(options.maxTurns === undefined ? {} : { maxTurns: options.maxTurns }),
+    ...(options.strictMcpConfig === undefined ? {} : { strictMcpConfig: options.strictMcpConfig }),
     ...(options.extraArgs === undefined ? {} : { hasExtraArgs: true }),
     ...(options.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
@@ -2298,6 +2306,7 @@ export function makeClaudeQueryOptions(input: {
   readonly settings?: ClaudeSettings;
   readonly promptSuggestions?: boolean;
   readonly sdkSettings?: string | ClaudeSdkSettings;
+  readonly workerControls?: OrchestrationV2AppThread["workerControls"];
   readonly environment?: NodeJS.ProcessEnv;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
   /** The thread's T3 MCP session holds the `device` capability. */
@@ -2315,6 +2324,7 @@ export function makeClaudeQueryOptions(input: {
   readonly appendSystemPromptFileText?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
+  readonly turnSource?: OrchestrationV2TurnSource;
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection, input.modelCatalog);
   const {
@@ -2352,7 +2362,53 @@ export function makeClaudeQueryOptions(input: {
   const threadIdentity: ClaudeAgentSdkThreadIdentity = input.resume
     ? { resume: input.nativeThreadId }
     : { sessionId: input.nativeThreadId };
-  const selectedTools = input.tools ?? CLAUDE_CODE_PRESET_TOOLS;
+  const permissionMode =
+    (launchArgPermissionMode as PermissionMode | null | undefined) ??
+    (launchArgSkipPermissions === null || launchArgSkipPermissions === "true"
+      ? "bypassPermissions"
+      : (input.permissionMode ?? "default"));
+  const controls = input.workerControls;
+  const runtimeTools = input.tools ?? CLAUDE_CODE_PRESET_TOOLS;
+  let selectedTools = runtimeTools;
+  let allowedTools = input.allowedTools;
+  let disallowedTools = input.disallowedTools;
+  // The SDK appends extraArgs after typed flags. Intersect tool ceilings and keep approval prompts.
+  if (controls?.allowedTools !== undefined) {
+    const instanceTools =
+      extraArgs.tools === undefined || extraArgs.tools === "default"
+        ? undefined
+        : (extraArgs.tools ?? "").split(/[\s,]+/);
+    selectedTools = controls.allowedTools.filter(
+      (tool) =>
+        (!isClaudeAgentSdkQueryToolList(runtimeTools) || runtimeTools.includes(tool)) &&
+        (instanceTools === undefined || instanceTools.includes(tool)),
+    );
+    allowedTools =
+      permissionMode === "bypassPermissions" && !isClaudeAgentSdkQueryToolList(runtimeTools)
+        ? selectedTools
+        : selectedTools.filter((tool) => input.allowedTools?.includes(tool));
+    delete extraArgs.tools;
+    delete extraArgs.allowedTools;
+    delete extraArgs["allowed-tools"];
+    delete extraArgs["mcp-config"];
+  }
+  if (controls?.agent !== undefined) delete extraArgs.agent;
+  if (controls?.maxTurns !== undefined) delete extraArgs["max-turns"];
+  if (controls?.disallowedTools !== undefined) {
+    const merged = new Set([...(disallowedTools ?? []), ...controls.disallowedTools]);
+    for (const flag of ["disallowedTools", "disallowed-tools"]) {
+      const value = extraArgs[flag]?.trim();
+      if (value) merged.add(value);
+      delete extraArgs[flag];
+    }
+    disallowedTools = Array.from(merged);
+  }
+  const turnSourceEnv =
+    input.turnSource === undefined ? undefined : { T3CODE_TURN_SOURCE: input.turnSource };
+  const environment =
+    controls?.env === undefined && turnSourceEnv === undefined
+      ? input.environment
+      : { ...(input.environment ?? process.env), ...controls?.env, ...turnSourceEnv };
   const selectionSettings =
     Object.keys(compiledSelection.settings).length === 0
       ? undefined
@@ -2385,7 +2441,9 @@ export function makeClaudeQueryOptions(input: {
         };
   // A settings file path cannot take extra keys, so it goes through unchanged.
   const effectiveQuerySettings =
-    (input.toolSearchOverride === undefined &&
+    (controls?.env === undefined &&
+      turnSourceEnv === undefined &&
+      input.toolSearchOverride === undefined &&
       aliasOverrideEnv === undefined &&
       autoCompactWindow === undefined) ||
     typeof compactQuerySettings === "string"
@@ -2394,6 +2452,7 @@ export function makeClaudeQueryOptions(input: {
           ...compactQuerySettings,
           env: {
             ...compactQuerySettings?.env,
+            ...controls?.env,
             ...aliasOverrideEnv,
             // Claude Code ranks this env var above the autoCompactWindow setting.
             ...(autoCompactWindow === undefined
@@ -2402,19 +2461,19 @@ export function makeClaudeQueryOptions(input: {
             ...(input.toolSearchOverride === undefined
               ? {}
               : { ENABLE_TOOL_SEARCH: input.toolSearchOverride }),
+            ...turnSourceEnv,
           },
         } as ClaudeSdkSettings);
   const deviceInstructions = input.mcpServers !== undefined && input.deviceToolsAvailable === true;
   const options: ClaudeAgentSdkQueryOptions = {
+    ...(controls?.agent === undefined ? {} : { agent: controls.agent }),
+    ...(controls?.maxTurns === undefined ? {} : { maxTurns: controls.maxTurns }),
+    ...(controls?.allowedTools === undefined ? {} : { strictMcpConfig: true }),
     model: compiledSelection.apiModelId,
     // T3 names threads; a supplied title skips Claude's redundant naming request.
     ...(input.title === undefined ? {} : { title: input.title }),
     tools: claudeAgentSdkQueryToolsForSdk(selectedTools),
-    permissionMode:
-      (launchArgPermissionMode as PermissionMode | null | undefined) ??
-      (launchArgSkipPermissions === null || launchArgSkipPermissions === "true"
-        ? "bypassPermissions"
-        : (input.permissionMode ?? "default")),
+    permissionMode,
     includePartialMessages: true,
     promptSuggestions: input.promptSuggestions === true,
     ...(compiledSelection.effort === undefined
@@ -2424,8 +2483,8 @@ export function makeClaudeQueryOptions(input: {
         }),
     ...threadIdentity,
     ...(input.resumeSessionAt === undefined ? {} : { resumeSessionAt: input.resumeSessionAt }),
-    ...(input.allowedTools === undefined ? {} : { allowedTools: [...input.allowedTools] }),
-    ...(input.disallowedTools === undefined ? {} : { disallowedTools: [...input.disallowedTools] }),
+    ...(allowedTools === undefined ? {} : { allowedTools: [...allowedTools] }),
+    ...(disallowedTools === undefined ? {} : { disallowedTools: [...disallowedTools] }),
     ...(input.canUseTool === undefined ? {} : { canUseTool: input.canUseTool }),
     ...(input.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
@@ -2452,7 +2511,7 @@ export function makeClaudeQueryOptions(input: {
     ...(input.settings?.binaryPath
       ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
       : {}),
-    ...(input.environment === undefined ? {} : { env: input.environment }),
+    ...(environment === undefined ? {} : { env: environment }),
     ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
     systemPrompt: {
       type: "preset" as const,
@@ -4976,9 +5035,11 @@ function providerFailureFromResult(
   return makeProviderFailure({
     message: listedError ?? structuredError ?? failureHint ?? message.result,
     code:
-      apiErrorStatus === null
-        ? (message.terminal_reason ?? "sdk_result_error")
-        : `api_error_${apiErrorStatus}`,
+      apiErrorStatus === 429 && usageLimited
+        ? "usage_limit"
+        : apiErrorStatus === null
+          ? (message.terminal_reason ?? "sdk_result_error")
+          : `api_error_${apiErrorStatus}`,
     class: failureClass,
     retryable: apiErrorStatus === 429 || apiErrorStatus === 529 ? true : null,
     resetAt: resetAt ?? null,
@@ -5325,7 +5386,21 @@ interface ClaudeLiveQueryContext {
   // Per process, not per session: a relative temp dir follows the cwd this CLI
   // was launched in, and a later turn's cwd can differ.
   readonly taskOutputRoot: string | undefined;
+  readonly openedSettingsEnv: Readonly<Record<string, string>> | undefined;
+  turnSource: OrchestrationV2TurnSource;
 }
+
+// applyFlagSettings replaces the whole env key, including any tool-search override.
+const updateClaudeTurnSource = Effect.fnUntraced(function* (
+  live: ClaudeLiveQueryContext,
+  source: OrchestrationV2TurnSource,
+) {
+  if (live.turnSource === source) return;
+  yield* live.query.applyFlagSettings({
+    env: { ...live.openedSettingsEnv, T3CODE_TURN_SOURCE: source },
+  });
+  live.turnSource = source;
+});
 
 interface ActiveClaudeToolCall {
   readonly nativeItemId: string;
@@ -6029,6 +6104,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             );
           });
         const sdkMessageLock = yield* Semaphore.make(1);
+        const steerOfferLock = yield* Semaphore.make(1);
         // Members can finish after the launching turn; retain state to emit each transition once.
         const workflowMemberStates = yield* Ref.make(
           new Map<
@@ -13099,7 +13175,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           nativeThreadId: string,
           queryPolicy: Effect.Success<ReturnType<typeof queryPolicyForTurn>>,
         ) {
-          const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+          const controls = turnInput.appThread.workerControls;
+          const mcpSession =
+            controls?.exposeT3Mcp === false || controls?.allowedTools !== undefined
+              ? undefined
+              : yield* mcpSessions.read(turnInput.threadId);
           // Claude Code defers its goal Stop hook only for its own background tasks, so a goal
           // re-prompts in a loop while T3 work that will wake this thread is still running.
           const onStop: HookCallback = () =>
@@ -13123,6 +13203,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             mcpOverrides,
             turnInput.runtimePolicy.workspace,
           );
+          const turnSource = turnSourceForCreationSource(turnInput.message.creationSource);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
           const existing = yield* Ref.get(queryContext);
           // Continuations drain existing output without prompting; retain the live process regardless of selection.
@@ -13132,6 +13213,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             !existing.stopping &&
             isClaudeProviderContinuationTurn(turnInput)
           ) {
+            yield* updateClaudeTurnSource(existing, turnSource);
             return existing;
           }
           const reuseLaunchSettings =
@@ -13192,6 +13274,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   }),
                 );
             }
+            yield* updateClaudeTurnSource(existing, turnSource);
             return existing;
           }
 
@@ -13274,6 +13357,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 : undefined,
               shouldResume,
             ),
+            workerControls: controls,
+            turnSource,
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
             ...(mcpOverrides.allowedTools === undefined
               ? {}
@@ -13372,6 +13457,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               resolvedTurnCwd,
               hostPlatform,
             ),
+            openedSettingsEnv:
+              typeof queryOptions.settings === "object" ? queryOptions.settings.env : undefined,
+            turnSource,
           };
           // One step, so the replaced process cannot exit between the install and the handoff.
           yield* Ref.update(queryContext, (replaced) => {
@@ -14203,50 +14291,62 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               }
             };
             yield* backgroundForegroundSubagents(existing, backgroundDeadline);
-            if (liveSteerSelection !== undefined) {
-              yield* applySelectionLive(existing, liveSteerSelection);
-            }
-            // The turn can end while the moves or the selection change are answered.
-            // A steer offered then would start a new turn the orchestrator never
-            // asked for, so the steer fails and the orchestrator starts the follow-up turn.
-            if (
-              (yield* Ref.get(activeTurn))?.providerTurnId !== turnInput.providerTurnId ||
-              (yield* Ref.get(queryContext)) !== existing ||
-              // No yield between this check and the set below.
-              currentTurn.steersClosed
-            ) {
-              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: CLAUDE_PROVIDER,
-                detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
-              });
-            }
-            // Register before offering: Claude can start the steer and end the turn before offer returns.
-            const messageId = turnInput.message.messageId;
-            currentTurn.steerUuids.add(steerUuid);
-            currentTurn.pendingSteers.set(steerUuid, {
-              messageId,
-              text: turnInput.message.text,
-              liveQuery: existing,
-              pdfReservation,
-              appContextOffered,
-              appContextBefore,
-            });
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.add(turnInput.providerTurnId);
-              return next;
-            });
-            yield* emitSteerStatus(currentTurn, messageId, "pending");
-            yield* Effect.uninterruptibleMask((restore) =>
-              restore(existing.query.offer(userMessage, commitOffer)).pipe(
-                Effect.tap(() => Effect.sync(commitOffer)),
-              ),
-            ).pipe(
-              Effect.onError(() =>
-                currentTurn.pendingSteers.delete(steerUuid)
-                  ? emitSteerStatus(currentTurn, messageId, "completed")
-                  : Effect.void,
-              ),
+            yield* steerOfferLock.withPermits(1)(
+              Effect.gen(function* () {
+                if (liveSteerSelection !== undefined) {
+                  yield* applySelectionLive(existing, liveSteerSelection);
+                }
+                const messageId = turnInput.message.messageId;
+                yield* sdkMessageLock.withPermits(1)(
+                  Effect.gen(function* () {
+                    // The turn can end while the moves or the selection change are answered.
+                    // A steer offered then would start a new turn the orchestrator never
+                    // asked for, so the steer fails and the orchestrator starts the follow-up turn.
+                    if (
+                      (yield* Ref.get(activeTurn))?.providerTurnId !== turnInput.providerTurnId ||
+                      (yield* Ref.get(queryContext)) !== existing ||
+                      // No yield between this check and the set below.
+                      currentTurn.steersClosed
+                    ) {
+                      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: CLAUDE_PROVIDER,
+                        detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
+                      });
+                    }
+                    yield* updateClaudeTurnSource(
+                      existing,
+                      turnSourceForCreationSource(turnInput.message.creationSource),
+                    );
+                    // Register before offering: Claude can start the steer and end the turn before offer returns.
+                    currentTurn.steerUuids.add(steerUuid);
+                    currentTurn.pendingSteers.set(steerUuid, {
+                      messageId,
+                      text: turnInput.message.text,
+                      liveQuery: existing,
+                      pdfReservation,
+                      appContextOffered,
+                      appContextBefore,
+                    });
+                    yield* Ref.update(steeredTurns, (current) => {
+                      const next = new Set(current);
+                      next.add(turnInput.providerTurnId);
+                      return next;
+                    });
+                    yield* emitSteerStatus(currentTurn, messageId, "pending");
+                  }),
+                );
+                yield* Effect.uninterruptibleMask((restore) =>
+                  restore(existing.query.offer(userMessage, commitOffer)).pipe(
+                    Effect.tap(() => Effect.sync(commitOffer)),
+                  ),
+                ).pipe(
+                  Effect.onError(() =>
+                    currentTurn.pendingSteers.delete(steerUuid)
+                      ? emitSteerStatus(currentTurn, messageId, "completed")
+                      : Effect.void,
+                  ),
+                );
+              }),
             );
           },
           (effect, turnInput) =>

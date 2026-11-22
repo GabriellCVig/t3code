@@ -180,7 +180,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       (input) =>
         Effect.gen(function* () {
           const sourcePoint = input.sourcePoint ?? { type: "latest_stable" as const };
-          const { threads, projection } = yield* readThread(input.threadId);
+          const { threads, projection, scope } = yield* readThread(input.threadId);
           const commandId = yield* newCommandId();
           if (input.action === "merge_back") {
             const targetThreadId = yield* required(input.targetThreadId, "targetThreadId");
@@ -193,7 +193,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
                 targetThreadId,
                 sourcePoint,
                 createdBy: "agent",
-                creationSource: "mcp",
+                creationSource: scope.client?.creationSource ?? "mcp",
               })
               .pipe(Effect.mapError(dispatchFailure));
             return { sequence: result.sequence, targetThreadId };
@@ -208,7 +208,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
               sourcePoint,
               ...(input.title === undefined ? {} : { title: input.title }),
               createdBy: "agent",
-              creationSource: "mcp",
+              creationSource: scope.client?.creationSource ?? "mcp",
             })
             .pipe(Effect.mapError(dispatchFailure));
           return { sequence: result.sequence, targetThreadId };
@@ -266,13 +266,15 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       Effect.gen(function* () {
         const requestId = yield* required(input.requestId, "requestId");
         const answers = yield* required(input.answers, "answers");
-        const { threads, projection } = yield* readQuestion({
+        const { threads, projection, scope } = yield* readQuestion({
           threadId: input.threadId,
           requestId,
         });
         const result = yield* threads
           .dispatch({
             type: "runtime-request.respond",
+            createdBy: scope.client?.creationSource === "cli" ? "user" : "agent",
+            creationSource: scope.client?.creationSource ?? "mcp",
             threadId: projection.thread.id,
             commandId: yield* newCommandId(),
             requestId,
@@ -351,10 +353,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         switch (input.action) {
           case "edit": {
             const text = yield* required(input.text, "text");
-            const { threads, projection } = yield* readThread(input.threadId);
+            const { threads, projection, scope } = yield* readThread(input.threadId);
             // An agent must not turn a person's queued message into a provider sign-out.
             const command = yield* ThreadMessageIntake.withQueuedAttachmentsOnSignOutText({
               type: "queued-run.edit",
+              createdBy: scope.client?.creationSource === "cli" ? "user" : "agent",
+              creationSource: scope.client?.creationSource ?? "mcp",
               commandId: yield* newCommandId(),
               threadId: projection.thread.id,
               runId,

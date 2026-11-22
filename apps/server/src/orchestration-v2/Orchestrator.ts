@@ -31,6 +31,7 @@ import {
   isDeliveredProviderTurn,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
+  turnSourceForCreationSource,
   MessageId,
   type NodeId,
   type ModelSelection,
@@ -4015,6 +4016,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       { concurrency: 1, discard: true },
     );
 
+  const getCompatibleAdapter = Effect.fn("Orchestrator.getCompatibleAdapter")(function* (
+    command: Pick<OrchestrationV2Command, "commandId" | "type">,
+    providerInstanceId: ProviderInstanceId,
+    workerControls: OrchestrationV2AppThread["workerControls"],
+  ) {
+    const adapter = yield* providerAdapters.get(providerInstanceId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestratorProviderAdapterError({
+            commandId: command.commandId,
+            providerInstanceId,
+            cause,
+          }),
+      ),
+    );
+    if (workerControls !== undefined && adapter.driver !== "claudeAgent") {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Worker controls require a Claude provider.",
+      });
+    }
+    return adapter;
+  });
+
   const dispatchThreadCreate = Effect.fn("orchestrationV2.dispatch.threadCreate")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.create" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -4037,6 +4063,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
+    if (command.workerControls !== undefined) {
+      yield* getCompatibleAdapter(
+        command,
+        command.modelSelection.instanceId,
+        command.workerControls,
+      );
+    }
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
@@ -4044,6 +4077,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projectId: command.projectId,
       title: command.title,
       ...(command.titleRenamed === true ? { titleRenamed: true } : {}),
+      ...(command.workerControls === undefined ? {} : { workerControls: command.workerControls }),
       providerInstanceId: command.modelSelection.instanceId,
       modelSelection: command.modelSelection,
       runtimeMode: command.runtimeMode,
@@ -4721,15 +4755,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const providerSwitchPlan =
       command.type === "thread.model-selection.set" || command.type === "provider.switch"
         ? yield* Effect.gen(function* () {
-            yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new OrchestratorProviderAdapterError({
-                    commandId: command.commandId,
-                    providerInstanceId: command.modelSelection.instanceId,
-                    cause,
-                  }),
-              ),
+            yield* getCompatibleAdapter(
+              command,
+              command.modelSelection.instanceId,
+              thread.workerControls,
             );
             const plan = yield* providerSwitchService
               .plan({
@@ -7154,6 +7183,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         : undefined,
     );
+    if (
+      projection.thread.workerControls !== undefined &&
+      command.modelSelection !== undefined &&
+      command.modelSelection.instanceId !== projection.thread.providerInstanceId
+    ) {
+      yield* getCompatibleAdapter(
+        command,
+        command.modelSelection.instanceId,
+        projection.thread.workerControls,
+      );
+    }
     if (command.steerFollowUpOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.steerFollowUpOfRunId);
       if (
@@ -9928,17 +9968,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
 
-      const targetAdapter = yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorProviderAdapterError({
-              commandId: command.commandId,
-              providerInstanceId: command.modelSelection.instanceId,
-              cause,
-            }),
-        ),
+      const targetAdapter = yield* getCompatibleAdapter(
+        command,
+        command.modelSelection.instanceId,
+        command.workerControls,
       );
-
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({
         commandId: command.commandId,
@@ -9973,6 +10007,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
+        ...(command.workerControls === undefined ? {} : { workerControls: command.workerControls }),
         ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
       };
       const task: OrchestrationV2Subagent = {
@@ -11480,8 +11515,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             text: command.feedback,
             attachments: [],
             streaming: false,
-            createdBy: "user",
-            creationSource: "server",
+            createdBy: command.createdBy ?? "user",
+            creationSource: command.creationSource ?? "server",
             createdAt: now,
             updatedAt: now,
           },
@@ -11519,8 +11554,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             inputIntent: "steer",
             text: command.feedback,
             attachments: [],
-            createdBy: "user",
-            creationSource: "server",
+            createdBy: command.createdBy ?? "user",
+            creationSource: command.creationSource ?? "server",
           },
         });
       }
@@ -11637,8 +11672,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           messageId: MessageId.make(`async-answer:${command.requestId}`),
           text: replies.join("\n\n"),
           attachments: [],
-          createdBy: "user" as const,
-          creationSource: "server" as const,
+          createdBy: command.createdBy ?? ("user" as const),
+          creationSource: command.creationSource ?? ("server" as const),
           dispatchMode,
         };
         yield* dispatchMessage(answer, events, effects);
@@ -12298,6 +12333,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: "A guest's message cannot be edited. Cancel it instead.",
       });
     }
+    const createdBy = command.createdBy ?? "system";
+    const creationSource = command.creationSource ?? "server";
+    if (
+      (queuedMessage.createdBy === "user" ||
+        turnSourceForCreationSource(queuedMessage.creationSource) === "human") &&
+      (createdBy !== "user" || turnSourceForCreationSource(creationSource) !== "human")
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Only an interactive user can edit a human-authored queued message.",
+      });
+    }
     yield* ensureGoalCommandSupported(
       command,
       { text: command.text, attachments: command.attachments ?? queuedMessage.attachments },
@@ -12334,6 +12382,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: withoutGuestAttribution({
         ...queuedMessage,
+        createdBy,
+        creationSource,
         text: command.text,
         ...editedAttachments,
         ...(command.context ? { context: command.context } : {}),
@@ -12350,6 +12400,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: withoutGuestAttribution({
           ...queuedTurnItem,
+          createdBy,
+          creationSource,
           text: command.text,
           ...editedAttachments,
           ...(command.context ? { context: command.context } : {}),

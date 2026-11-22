@@ -808,7 +808,30 @@ function makeReplayQueryRunner(
 
   return {
     open: (input) => {
-      assertNextOutboundFrame(makeClaudeQueryOpenFrame(input));
+      // Older recordings predate hook provenance. Compare their original settings
+      // and keep comparing every flag on recordings that include the source.
+      const entry = transcript.entries[cursor];
+      const recorded =
+        entry?.type === "expect_outbound"
+          ? (entry.frame as Partial<ClaudeQueryOpenFrame> | null)
+          : null;
+      const recordedSettings = recorded?.options?.settings;
+      const settings = input.options.settings;
+      const legacyEnv =
+        typeof settings === "object" &&
+        settings.env?.T3CODE_TURN_SOURCE !== undefined &&
+        !(
+          typeof recordedSettings === "object" &&
+          recordedSettings.env?.T3CODE_TURN_SOURCE !== undefined
+        );
+      let options = input.options;
+      if (legacyEnv) {
+        const { env, ...rest } = settings;
+        const { T3CODE_TURN_SOURCE: _source, ...otherEnv } = env!;
+        const stableSettings = Object.keys(otherEnv).length > 0 ? { ...rest, env: otherEnv } : rest;
+        options = { ...options, settings: stableSettings };
+      }
+      assertNextOutboundFrame(makeClaudeQueryOpenFrame({ options }));
       return {
         messages: Stream.fromAsyncIterable(replayMessagesWithGateCleanup(input.options), (cause) =>
           replayQueryRunnerError(transcript, cause),
@@ -824,11 +847,19 @@ function makeReplayQueryRunner(
               model,
             });
           }),
-        applyFlagSettings: (settings) =>
+        applyFlagSettings: (update) =>
           replayEffect(() => {
+            if (
+              legacyEnv &&
+              update.env?.T3CODE_TURN_SOURCE !== undefined &&
+              sameFrame(update, {
+                env: { ...settings.env, T3CODE_TURN_SOURCE: update.env.T3CODE_TURN_SOURCE },
+              })
+            )
+              return;
             assertNextOutboundFrame({
               type: "query.apply_flag_settings",
-              settings,
+              settings: update,
             });
           }),
         setPermissionMode: (mode) =>

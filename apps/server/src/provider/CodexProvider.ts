@@ -339,6 +339,17 @@ export function mapCodexModelCapabilities(
     });
   }
 
+  optionDescriptors.push({
+    id: "contextWindow",
+    label: "Context window",
+    type: "select",
+    options: [
+      { id: "default", label: "Default", isDefault: true },
+      { id: "1m", label: "1M tokens" },
+    ],
+    currentValue: "default",
+  });
+
   return createModelCapabilities({
     optionDescriptors,
   });
