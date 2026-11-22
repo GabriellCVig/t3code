@@ -2948,7 +2948,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const repoRoot = yield* RepoRoot;
     buildConfig.afterPack = path.join(repoRoot, "scripts/linux-after-pack.ts");
     buildConfig.linux = {
-      target: target === "AppImage" ? [target, "deb"] : [target],
+      target:
+        target === "AppImage" && process.env.T3CODE_SKIP_DEB !== "1" ? [target, "deb"] : [target],
       executableName: "t3code",
       icon: "icons",
       category: "Development",
