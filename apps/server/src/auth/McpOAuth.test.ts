@@ -325,6 +325,32 @@ it.effect("registers loopback and https clients and never redirects for an unver
   ),
 );
 
+it.live("only a locally issued CLI credential identifies thread CLI messages", () =>
+  withRoutes((handler, auth) =>
+    Effect.gen(function* () {
+      for (const source of ["cli", "mcp"] as const) {
+        const session = yield* auth.issueMcpClientSession({
+          label: "t3 thread cli",
+          peerLink: false,
+          access: "read-only",
+          client: { deviceType: "bot" },
+          ...(source === "cli" ? { creationSource: source } : {}),
+        });
+        const headers = { authorization: `Bearer ${session.token}` };
+        const client = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(at("/mcp", { headers })),
+        );
+        expect(client.creationSource).toBe(source);
+        expect(client.access).toBe("read-only");
+        const ticket = yield* handler(
+          at("/api/auth/websocket-ticket", { method: "POST", headers }),
+        );
+        expect(ticket.status).toBe(401);
+      }
+    }),
+  ),
+);
+
 it.live("signs in with a pairing code and issues a token only /mcp accepts", () =>
   withRoutes((handler, auth) =>
     Effect.gen(function* () {

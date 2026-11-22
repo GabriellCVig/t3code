@@ -1,7 +1,10 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Resolve the fixture paths before the Effect tests run.
+import * as NodePath from "node:path";
+import * as Logger from "effect/Logger";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { AuthSessionId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
+import { AuthSessionId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -27,6 +30,8 @@ import {
   latestRunError,
   launchModelSelection,
   readLatestMessages,
+  readThreadStatus,
+  threadHealthClass,
   resolveProject,
   threadCommand,
   type ThreadTools,
@@ -740,4 +745,473 @@ it.live("resolves a path inside a git worktree of the project's repository to th
     assert.include(ambiguous.message, "sample (project-sample)");
     assert.include(ambiguous.message, "feature (project-feature)");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+const runThread = Command.runWith(threadCommand, { version: "test" });
+
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))(
+  "thread commands",
+  (it) => {
+    it.effect.each(["--worktree", "--branch"])("rejects --worktree-path with %s", (flag) =>
+      Effect.gen(function* () {
+        const error = yield* runThread([
+          "start",
+          ".",
+          "Review",
+          "--worktree-path",
+          "/repo/review",
+          flag,
+          "feature",
+        ]).pipe(Effect.flip);
+        assert.include(error, {
+          _tag: "ThreadUsageError",
+          detail: "--worktree-path cannot be combined with --worktree or --branch.",
+        });
+      }),
+    );
+
+    it.effect.each(["", "   "])("rejects an empty worktree path %j", (value) =>
+      Effect.gen(function* () {
+        const error = yield* runThread(["start", ".", "Review", "--worktree-path", value]).pipe(
+          Effect.flip,
+        );
+        assert.include(error, { _tag: "ThreadUsageError", detail: "The worktree path is empty." });
+      }),
+    );
+
+    const projectId = "project-1";
+    const message = "Review";
+    const cliCwd = NodePath.resolve("/cli/repo");
+    const worktreePath = NodePath.resolve("/repo/review");
+    const launchArgs = { projectId, title: message, message };
+    const interruptResult = { threadId, runId, status: "interrupt_requested" };
+
+    it.effect.each([
+      ...(
+        [
+          [" .worktrees/foo ", NodePath.join(cliCwd, ".worktrees", "foo")],
+          [".", cliCwd],
+        ] as const
+      ).map(([arg, resolved]) => ({
+        args: ["start", projectId, message, "--worktree-path", arg],
+        tool: "t3_thread_launch",
+        input: {
+          ...launchArgs,
+          workspaceStrategy: { type: "existing_worktree", worktreePath: resolved },
+        },
+        result: { threadId, runId, projectId },
+        output: threadId,
+      })),
+      {
+        args: [
+          "start",
+          projectId,
+          message,
+          "--worktree-path",
+          worktreePath,
+          "--client-request-id",
+          "launch-id",
+        ],
+        tool: "t3_thread_launch",
+        input: {
+          ...launchArgs,
+          workspaceStrategy: { type: "existing_worktree", worktreePath },
+          clientRequestId: "launch-id",
+        },
+        result: { threadId, runId, projectId },
+        output: threadId,
+      },
+      {
+        args: ["start", projectId, message, "--worktree", "main", "--branch", "feature"],
+        tool: "t3_thread_launch",
+        input: {
+          ...launchArgs,
+          workspaceStrategy: { type: "worktree", baseRef: "main", branch: "feature" },
+        },
+        result: { threadId, runId, projectId },
+        output: threadId,
+      },
+      {
+        args: ["send", threadId, message, "--client-request-id", "send-id"],
+        tool: "t3_thread_send",
+        input: { threadId, message, mode: "queue", clientRequestId: "send-id" },
+        result: { threadId, runId, messageId: "message-1", status: "queued", delivery: "queued" },
+        output: "Queued.",
+      },
+      {
+        args: ["archive", threadId],
+        tool: "t3_thread_organize",
+        input: { threadId, action: "archive" },
+        result: { sequence: 1 },
+        output: "Archived.",
+      },
+      {
+        args: ["archive", threadId, "--unarchive", "--json"],
+        tool: "t3_thread_organize",
+        input: { threadId, action: "unarchive" },
+        result: { sequence: 1 },
+        output: JSON.stringify({ sequence: 1 }),
+      },
+      {
+        args: ["interrupt", threadId],
+        tool: "t3_thread_interrupt",
+        input: { threadId },
+        result: interruptResult,
+        output: "interrupt_requested",
+      },
+      {
+        args: ["interrupt", threadId, "--run", runId, "--reason", "Done", "--stop", "--json"],
+        tool: "t3_thread_interrupt",
+        input: { threadId, runId, reason: "Done", stop: true },
+        result: interruptResult,
+        output: JSON.stringify(interruptResult),
+      },
+    ])("thread $args", ({ args, tool, input, result, output }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-thread-cli-" });
+        const path = yield* Path.Path;
+        yield* persistServerRuntimeState({
+          path: path.join(baseDir, "userdata", "server-runtime.json"),
+          state: yield* makePersistedServerRuntimeState({
+            config: { host: "127.0.0.1", devUrl: undefined },
+            port: 3773,
+          }),
+        });
+        const call = vi.fn((name: string, _args: Readonly<Record<string, unknown>>) =>
+          Effect.succeed({
+            structuredContent:
+              name === "t3_project_list"
+                ? {
+                    projects: [{ id: projectId, title: "Project", workspaceRoot: "/repo" }],
+                    nextCursor: null,
+                  }
+                : result,
+          }),
+        );
+        using _session = vi
+          .spyOn(McpBridge, "mcpToolSession")
+          .mockReturnValue(Effect.succeed({ call }));
+        const lines = yield* runThread([...args, "--base-dir", baseDir]).pipe(
+          Effect.provideService(HostProcess.WorkingDirectory, cliCwd),
+          Effect.andThen(TestConsole.logLines),
+          Effect.provide(
+            Layer.merge(
+              Layer.fresh(TestConsole.layer),
+              Logger.layer([], { mergeWithExisting: false }),
+            ),
+          ),
+        );
+        assert.deepEqual(call.mock.lastCall, [tool, input]);
+        assert.deepEqual(lines, [output]);
+      }),
+    );
+  },
+);
+
+const projectId = "project-1";
+const threadDetail = (overrides: Record<string, unknown> = {}) => ({
+  threadId,
+  projectId,
+  title: "Lead",
+  status: "running",
+  activeRunId: runId,
+  latestRunId: runId,
+  providerInstanceId: "claudeAgent",
+  model: "claude-opus-5-5",
+  branch: "main",
+  worktreePath: "/work/repo",
+  pendingRequestCount: 0,
+  blockedOnThreadWait: false,
+  usageLimit: null,
+  ...overrides,
+});
+const listItem = (id: string, parentThreadId: string | null, status = "running") => ({
+  threadId: ThreadId.make(id),
+  title: id,
+  status,
+  latestRunId: RunId.make(`${id}-run`),
+  providerInstanceId: "codex",
+  model: "gpt-6.2-astra",
+  parentThreadId,
+  relationshipToParent: "subagent",
+});
+
+it.effect("status reads passively and lists only this thread's active children", () =>
+  Effect.gen(function* () {
+    const { tools, calls } = scriptedTools({
+      t3_thread_read: [
+        {
+          thread: threadDetail({
+            status: "waiting",
+            blockedOnThreadWait: true,
+            pendingBackgroundTasks: [
+              { taskId: "task-1", kind: "subagent", childThreadId: "child-1" },
+            ],
+          }),
+          recentRuns: [{ runId, status: "waiting" }],
+        },
+      ],
+      t3_thread_list: [
+        {
+          threads: [
+            listItem("child-1", threadId),
+            listItem("other", "thread-2"),
+            { ...listItem("fork", threadId), relationshipToParent: "fork" },
+          ],
+          nextCursor: 1,
+        },
+        { threads: [listItem("child-2", threadId, "queued")], nextCursor: null },
+      ],
+    });
+
+    const status = yield* readThreadStatus(tools, threadId);
+
+    // Never task_status: that would acknowledge a child result the parent has not seen.
+    assert.deepStrictEqual(
+      calls.map((entry) => entry.tool),
+      ["t3_thread_read", "t3_thread_list", "t3_thread_list"],
+    );
+    assert.deepStrictEqual(calls[1]?.args, {
+      projectId,
+      includeSubagents: true,
+      statuses: ["preparing", "queued", "starting", "running", "waiting"],
+      limit: 100,
+      cursor: 0,
+    });
+    assert.deepStrictEqual(status, {
+      threadId,
+      title: "Lead",
+      status: "waiting",
+      healthClass: "running",
+      activeRunId: runId,
+      latestRunId: runId,
+      latestRunStatus: "waiting",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5",
+      branch: "main",
+      worktreePath: "/work/repo",
+      pendingRequestCount: 0,
+      pendingRequests: [],
+      blockedOnThreadWait: true,
+      pendingBackgroundTasks: [
+        { taskId: "task-1", kind: "subagent", childThreadId: ThreadId.make("child-1") },
+      ],
+      activeChildren: [
+        {
+          threadId: ThreadId.make("child-1"),
+          title: "child-1",
+          status: "running",
+          latestRunId: RunId.make("child-1-run"),
+          providerInstanceId: "codex",
+          model: "gpt-6.2-astra",
+        },
+        {
+          threadId: ThreadId.make("child-2"),
+          title: "child-2",
+          status: "queued",
+          latestRunId: RunId.make("child-2-run"),
+          providerInstanceId: "codex",
+          model: "gpt-6.2-astra",
+        },
+      ],
+      usageLimit: null,
+    });
+  }),
+);
+
+it.effect("status reports a usage-limit hold as rate_limited with its reset time", () =>
+  Effect.gen(function* () {
+    const usageLimit = {
+      rateLimited: true as const,
+      resetsAt: "2026-11-22T06:00:00.000Z",
+      instanceId: ProviderInstanceId.make("claudeAgent_claude2"),
+      detail: "Claude usage limit reached.",
+    };
+    const { tools } = scriptedTools({
+      t3_thread_read: [
+        {
+          thread: threadDetail({ status: "queued", activeRunId: null, usageLimit }),
+          recentRuns: [{ runId, status: "failed" }],
+        },
+      ],
+      t3_thread_list: [{ threads: [], nextCursor: null }],
+    });
+
+    const status = yield* readThreadStatus(tools, threadId);
+
+    assert.equal(status.healthClass, "rate_limited");
+    assert.deepStrictEqual(status.usageLimit, usageLimit);
+  }),
+);
+
+it.effect(
+  "status reports the interrupted turn when the recent run page contains only held work",
+  () =>
+    Effect.gen(function* () {
+      const { tools } = scriptedTools({
+        t3_thread_read: [
+          {
+            thread: threadDetail({ status: "interrupted", activeRunId: null }),
+            recentRuns: [{ runId: "held", status: "queued" }],
+          },
+        ],
+        t3_thread_list: [{ threads: [], nextCursor: null }],
+      });
+      const status = yield* readThreadStatus(tools, threadId);
+      assert.equal(status.latestRunStatus, "interrupted");
+      assert.equal(status.healthClass, "interrupted");
+    }),
+);
+
+it("health class puts a blocked human ahead of a hold and a hold ahead of a run", () => {
+  const base = {
+    status: "idle",
+    latestRunStatus: null,
+    pendingRequestCount: 0,
+    pendingRequests: [],
+    activeChildren: [],
+    pendingBackgroundTasks: [],
+    usageLimit: null,
+  } as const;
+  const limit = {
+    rateLimited: true,
+    resetsAt: null,
+    instanceId: ProviderInstanceId.make("codex"),
+    detail: null,
+  } as const;
+  const cases: Array<[Parameters<typeof threadHealthClass>[0], string]> = [
+    [base, "idle"],
+    [
+      {
+        ...base,
+        status: "completed",
+        latestRunStatus: "completed",
+        activeChildren: [listItem("child", threadId)],
+      },
+      "waiting_children",
+    ],
+    [
+      {
+        ...base,
+        status: "waiting",
+        latestRunStatus: "completed",
+        pendingBackgroundTasks: [{ kind: "command", awaited: true }],
+      },
+      "waiting_children",
+    ],
+    [
+      {
+        ...base,
+        status: "completed",
+        latestRunStatus: "completed",
+        pendingBackgroundTasks: [{ kind: "command" }],
+      },
+      "idle",
+    ],
+    [{ ...base, status: "running" }, "running"],
+    [{ ...base, status: "failed", latestRunStatus: "failed" }, "failed"],
+    [{ ...base, status: "failed", latestRunStatus: "failed", usageLimit: limit }, "rate_limited"],
+    [{ ...base, latestRunStatus: "cancelled" }, "interrupted"],
+    [{ ...base, latestRunStatus: "interrupted" }, "interrupted"],
+    [{ ...base, status: "queued", usageLimit: limit }, "rate_limited"],
+    [
+      {
+        ...base,
+        status: "waiting",
+        usageLimit: limit,
+        pendingRequestCount: 1,
+        pendingRequests: [{ kind: "command" }],
+      },
+      "waiting_approval",
+    ],
+    [
+      {
+        ...base,
+        status: "waiting",
+        pendingRequestCount: 2,
+        pendingRequests: [{ kind: "command" }, { kind: "user_input" }],
+      },
+      "waiting_user",
+    ],
+    [
+      {
+        ...base,
+        status: "running",
+        pendingRequestCount: 1,
+        pendingRequests: [{ kind: "user_input", blocking: false }],
+      },
+      "running",
+    ],
+    // An older server sends only the count.
+    [{ ...base, status: "waiting", pendingRequestCount: 1 }, "waiting_user"],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(threadHealthClass(input), expected, JSON.stringify(input));
+  }
+});
+
+it.effect("show keeps each message's server-assigned provenance", () =>
+  Effect.gen(function* () {
+    const item = (index: number, overrides: Record<string, unknown>) => ({
+      position: index,
+      itemId: `item-${index}`,
+      runId,
+      type: "user_message",
+      text: `message ${index}`,
+      textTruncated: false,
+      ...overrides,
+    });
+    const { tools } = scriptedTools({
+      t3_thread_read: [
+        {
+          thread: threadDetail(),
+          recentRuns: [],
+          items: [],
+        },
+        {
+          thread: threadDetail(),
+          items: [
+            item(0, { createdBy: "user", creationSource: "web" }),
+            item(1, { createdBy: "agent", creationSource: "mcp" }),
+            item(2, { type: "reasoning", createdBy: null, creationSource: null }),
+            item(3, { type: "assistant_message", createdBy: null, creationSource: null }),
+          ],
+          nextPosition: 3,
+          hasMore: false,
+        },
+      ],
+    });
+
+    const { messages } = yield* readLatestMessages(tools, threadId, 10);
+
+    assert.deepStrictEqual(
+      messages.map(({ type, createdBy, creationSource, text }) => ({
+        role: type === "user_message" ? "user" : "assistant",
+        createdBy,
+        creationSource,
+        text,
+      })),
+      [
+        {
+          role: "user",
+          createdBy: "user",
+          creationSource: "web",
+          text: "message 0",
+        },
+        {
+          role: "user",
+          createdBy: "agent",
+          creationSource: "mcp",
+          text: "message 1",
+        },
+        {
+          role: "assistant",
+          createdBy: null,
+          creationSource: null,
+          text: "message 3",
+        },
+      ],
+    );
+  }),
 );

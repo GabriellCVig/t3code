@@ -1011,6 +1011,7 @@ export const respondToThreadApproval = Effect.fn("EnvironmentCommands.respondToT
   function* (input: RespondToThreadApprovalInput) {
     return yield* dispatch({
       type: "runtime-request.respond",
+      ...(input.creationSource === undefined ? {} : { creationSource: input.creationSource }),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       requestId: input.requestId,
@@ -1024,6 +1025,7 @@ export const respondToThreadUserInput = Effect.fn("EnvironmentCommands.respondTo
   function* (input: RespondToThreadUserInputInput) {
     return yield* dispatch({
       type: "runtime-request.respond",
+      ...(input.creationSource === undefined ? {} : { creationSource: input.creationSource }),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       requestId: input.requestId,
@@ -1221,6 +1223,7 @@ export const editQueuedRun = Effect.fn("EnvironmentCommands.editQueuedRun")(func
       : yield* persistAttachments(input.threadId, input.edit.messageId, input.edit.attachments);
   return yield* dispatch({
     type: "queued-run.edit",
+    ...(input.creationSource === undefined ? {} : { creationSource: input.creationSource }),
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     runId: input.runId,

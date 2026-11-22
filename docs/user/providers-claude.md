@@ -81,6 +81,18 @@ over 200,000 tokens. Each Claude provider's settings can override it:
 - **Never** skips idle compaction and Claude's resume prompt. **Auto-compact after**
   still applies, and you can still compact by hand.
 
+## Hook environment
+
+Claude hooks can read `T3CODE_TURN_SOURCE` to identify what triggered a turn.
+
+| Value       | Source                                |
+| ----------- | ------------------------------------- |
+| `human`     | Web, desktop, or mobile app           |
+| `agent`     | An MCP caller                         |
+| `cli`       | A local `t3 thread` command           |
+| `scheduled` | A scheduled task, including a webhook |
+| `system`    | T3 Code or the provider               |
+
 ## Usage limits
 
 If your Claude subscription runs out of usage mid-turn, the thread shows which

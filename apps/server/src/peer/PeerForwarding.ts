@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   OrchestratorMcpFailure,
+  OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
@@ -185,6 +186,22 @@ const make = Effect.gen(function* () {
         code: "invalid_request",
         message: "A launch in a linked environment cannot carry attachments yet.",
       });
+    }
+    // Older peers decode launches without worker controls and would start an unrestricted worker.
+    if (toolName === "t3_thread_launch" && args.workerControls !== undefined) {
+      const peer = yield* peers.call({
+        environmentId,
+        tool: "orchestrator_capabilities",
+        arguments: {},
+        limits,
+        success: OrchestratorMcpCapabilitiesResult,
+      });
+      if (peer.features.workerControls !== true) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "This linked environment does not support worker controls.",
+        });
+      }
     }
     if (typeof args.clientRequestId === "string") {
       args.clientRequestId = yield* scopedRequestId(scope.requestNamespace, args.clientRequestId);

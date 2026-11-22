@@ -1,5 +1,7 @@
 import {
+  OrchestrationV2DispatchCommandResult,
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendResult,
@@ -13,8 +15,10 @@ import {
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadStatus,
   type OrchestratorMcpThreadTimelineItem,
+  type OrchestratorMcpThreadUsageLimit,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -219,6 +223,7 @@ export type ThreadTools = ReturnType<typeof makeThreadTools>;
 const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
   flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
   run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
+  access: "full-access" | "read-only" = "full-access",
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel, { quietLogs: flags.json });
@@ -235,7 +240,8 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
         label: "t3 thread cli",
         // The CLI runs as the machine's owner. New threads still start at
         // the project's default mode, never at this ceiling by default.
-        access: "full-access",
+        creationSource: "cli",
+        access,
         peerLink: false,
         client: { deviceType: "bot" },
       }),
@@ -735,22 +741,38 @@ export const titleFromMessage = (message: string) => {
   return `${firstLine.slice(0, end).trimEnd()}…`;
 };
 
-const launchWorkspaceStrategy = (input: {
+const launchWorkspaceStrategy = Effect.fn("cli.thread.launchWorkspaceStrategy")(function* (input: {
   readonly worktree: Option.Option<string>;
   readonly branch: Option.Option<string>;
-}) =>
-  Option.match(input.worktree, {
-    onNone: () =>
-      Option.isSome(input.branch)
-        ? Effect.fail(new ThreadUsageError({ detail: "--branch needs --worktree <base-ref>." }))
-        : Effect.void,
-    onSome: (baseRef) =>
-      Effect.succeed({
-        type: "worktree" as const,
-        baseRef,
-        ...Option.match(input.branch, { onNone: () => ({}), onSome: (branch) => ({ branch }) }),
-      }),
-  });
+  readonly worktreePath: Option.Option<string>;
+}) {
+  if (Option.isSome(input.worktreePath)) {
+    if (Option.isSome(input.worktree) || Option.isSome(input.branch)) {
+      return yield* new ThreadUsageError({
+        detail: "--worktree-path cannot be combined with --worktree or --branch.",
+      });
+    }
+    const worktreePath = input.worktreePath.value.trim();
+    if (worktreePath.length === 0) {
+      return yield* new ThreadUsageError({ detail: "The worktree path is empty." });
+    }
+    const path = yield* Path.Path;
+    return {
+      type: "existing_worktree" as const,
+      worktreePath: path.resolve(yield* HostProcess.WorkingDirectory, worktreePath),
+    };
+  }
+  if (Option.isSome(input.worktree)) {
+    return {
+      type: "worktree" as const,
+      baseRef: input.worktree.value,
+      ...(Option.isSome(input.branch) ? { branch: input.branch.value } : {}),
+    };
+  }
+  if (Option.isSome(input.branch)) {
+    return yield* new ThreadUsageError({ detail: "--branch needs --worktree <base-ref>." });
+  }
+});
 
 /**
  * Options are model specific, so they need an explicit model. `true` and
@@ -791,6 +813,12 @@ export const launchModelSelection = Effect.fn("cli.thread.launchModelSelection")
   };
 });
 
+const clientRequestIdFlag = Flag.String("client-request-id").pipe(
+  Flag.withDescription(
+    "Forward a request id to the server. Separate CLI calls use separate sessions.",
+  ),
+  Flag.optional,
+);
 const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDescription("Print JSON instead of text."),
   Flag.withDefault(false),
@@ -866,6 +894,7 @@ const threadListCommand = Command.make("list", {
           yield* Console.log(`${thread.threadId}  ${thread.status.padEnd(11)}  ${thread.title}`);
         }
       }),
+      "read-only",
     ).pipe(reportThreadErrors),
   ),
 );
@@ -906,11 +935,16 @@ const threadStartCommand = Command.make("start", {
     ),
     Flag.optional,
   ),
+  worktreePath: Flag.String("worktree-path").pipe(
+    Flag.withDescription("Run in an existing Git worktree of this project."),
+    Flag.optional,
+  ),
   branch: Flag.String("branch").pipe(
     Flag.withDescription("Branch name for the new worktree."),
     Flag.optional,
   ),
   outputSchema: outputSchemaFlag,
+  clientRequestId: clientRequestIdFlag,
   wait: waitFlag,
   json: jsonFlag,
 }).pipe(
@@ -936,6 +970,9 @@ const threadStartCommand = Command.make("start", {
               ...(flags.generateTitle ? { generateTitle: true } : {}),
               message,
               ...output,
+              ...(Option.isSome(flags.clientRequestId)
+                ? { clientRequestId: flags.clientRequestId.value }
+                : {}),
               ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
               ...(modelSelection === undefined ? {} : { modelSelection }),
             },
@@ -962,6 +999,7 @@ const threadSendCommand = Command.make("send", {
   thread: threadArgument,
   message: messageArgument,
   outputSchema: outputSchemaFlag,
+  clientRequestId: clientRequestIdFlag,
   wait: waitFlag,
   json: jsonFlag,
 }).pipe(
@@ -980,7 +1018,15 @@ const threadSendCommand = Command.make("send", {
           const followWakes = flags.wait ? yield* threadIsIdle(tools, threadId) : false;
           const sent = yield* tools.call(
             "t3_thread_send",
-            { threadId, message, mode: "queue", ...output },
+            {
+              threadId,
+              message,
+              ...output,
+              mode: "queue",
+              ...(Option.isSome(flags.clientRequestId)
+                ? { clientRequestId: flags.clientRequestId.value }
+                : {}),
+            },
             OrchestratorMcpThreadSendResult,
           );
           if (flags.wait) {
@@ -994,6 +1040,80 @@ const threadSendCommand = Command.make("send", {
           yield* flags.json
             ? printJson(sent)
             : Console.log(sent.delivery === "queued" ? "Queued." : "Sent.");
+        }),
+      );
+    }).pipe(reportThreadErrors),
+  ),
+);
+
+const threadArchiveCommand = Command.make("archive", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  unarchive: Flag.Boolean("unarchive").pipe(
+    Flag.withDescription("Restore the thread from the archive."),
+    Flag.withDefault(false),
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Archive a thread or restore it with --unarchive."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      yield* withThreadTools(
+        flags,
+        Effect.fn("cli.thread.archive")(function* (tools) {
+          const result = yield* tools.call(
+            "t3_thread_organize",
+            {
+              threadId,
+              action: flags.unarchive ? "unarchive" : "archive",
+            },
+            OrchestrationV2DispatchCommandResult,
+          );
+          yield* flags.json
+            ? printJson(result)
+            : Console.log(flags.unarchive ? "Unarchived." : "Archived.");
+        }),
+      );
+    }).pipe(reportThreadErrors),
+  ),
+);
+
+const threadInterruptCommand = Command.make("interrupt", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  run: Flag.String("run").pipe(
+    Flag.withDescription("Run id. Defaults to the newest active run."),
+    Flag.optional,
+  ),
+  reason: Flag.String("reason").pipe(
+    Flag.withDescription("Reason for the interruption."),
+    Flag.optional,
+  ),
+  stop: Flag.Boolean("stop").pipe(
+    Flag.withDescription("Stop the thread, its watches and its delegated tasks. Overrides --run."),
+    Flag.withDefault(false),
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Interrupt a running turn."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      yield* withThreadTools(
+        flags,
+        Effect.fn("cli.thread.interrupt")(function* (tools) {
+          const result = yield* tools.call(
+            "t3_thread_interrupt",
+            {
+              threadId,
+              ...(Option.isSome(flags.run) ? { runId: flags.run.value } : {}),
+              ...(Option.isSome(flags.reason) ? { reason: flags.reason.value } : {}),
+              ...(flags.stop ? { stop: true } : {}),
+            },
+            OrchestratorMcpThreadInterruptResult,
+          );
+          yield* flags.json ? printJson(result) : Console.log(result.status);
         }),
       );
     }).pipe(reportThreadErrors),
@@ -1025,6 +1145,8 @@ const threadShowCommand = Command.make("show", {
             readFullText(tools, threadId, item).pipe(
               Effect.map((text) => ({
                 role: item.type === "user_message" ? "user" : "assistant",
+                createdBy: item.createdBy,
+                creationSource: item.creationSource,
                 runId: item.runId,
                 text,
               })),
@@ -1053,17 +1175,220 @@ const threadShowCommand = Command.make("show", {
             yield* Console.log(`\n[${entry.role}]\n${entry.text}`);
           }
         }),
+        "read-only",
+      );
+    }).pipe(reportThreadErrors),
+  ),
+);
+
+const ACTIVE_RUN_STATUSES = ["preparing", "queued", "starting", "running", "waiting"] as const;
+const USER_REQUEST_KINDS: ReadonlySet<string> = new Set([
+  "user_input",
+  "mcp-elicitation",
+  "auth_refresh",
+]);
+
+export type ThreadHealthClass =
+  | "running"
+  | "idle"
+  | "waiting_user"
+  | "waiting_children"
+  | "waiting_approval"
+  | "rate_limited"
+  | "failed"
+  | "interrupted";
+
+/** One label a supervisor can branch on; a human-blocking request outranks a held run. */
+export const threadHealthClass = (input: {
+  readonly status: OrchestratorMcpThreadStatus;
+  readonly latestRunStatus: OrchestratorMcpThreadStatus | null;
+  readonly activeChildren: ReadonlyArray<{ readonly threadId: ThreadId }>;
+  readonly pendingBackgroundTasks: Parameters<typeof backgroundWorkHoldsCompletion>[0];
+  readonly pendingRequestCount: number;
+  readonly pendingRequests: ReadonlyArray<{
+    readonly kind: string;
+    readonly blocking?: boolean | undefined;
+  }>;
+  readonly usageLimit: OrchestratorMcpThreadUsageLimit | null;
+}): ThreadHealthClass => {
+  const blocking = input.pendingRequests.filter((request) => request.blocking !== false);
+  if (blocking.length > 0) {
+    return blocking.some((request) => USER_REQUEST_KINDS.has(request.kind))
+      ? "waiting_user"
+      : "waiting_approval";
+  }
+  // Older servers provide only a count.
+  if (input.pendingRequestCount > input.pendingRequests.length) return "waiting_user";
+  if (input.usageLimit !== null) return "rate_limited";
+  if (
+    (input.status === "completed" ||
+      (input.status === "waiting" && input.latestRunStatus === "completed")) &&
+    (input.activeChildren.length > 0 || backgroundWorkHoldsCompletion(input.pendingBackgroundTasks))
+  )
+    return "waiting_children";
+  if ((ACTIVE_RUN_STATUSES as ReadonlyArray<string>).includes(input.status)) return "running";
+  switch (input.latestRunStatus) {
+    case "failed":
+      return "failed";
+    case "interrupted":
+    case "cancelled":
+      return "interrupted";
+    default:
+      return "idle";
+  }
+};
+
+/**
+ * Passive status: only `t3_thread_read` from outside a thread and
+ * `t3_thread_list`, so it never acknowledges a child result or changes state.
+ */
+export const readThreadStatus = Effect.fn("cli.thread.readStatus")(function* (
+  tools: ThreadTools,
+  threadId: ThreadId,
+) {
+  const { thread, recentRuns } = yield* tools.call(
+    "t3_thread_read",
+    { threadId, limit: 1, runLimit: 1, maxCharsPerItem: 1 },
+    OrchestratorMcpThreadReadResult,
+  );
+  const activeChildren: Array<{
+    readonly threadId: ThreadId;
+    readonly title: string;
+    readonly status: OrchestratorMcpThreadStatus;
+    readonly latestRunId: RunId | null;
+    readonly providerInstanceId: string;
+    readonly model: string;
+  }> = [];
+  let cursor: number | null = 0;
+  while (cursor !== null) {
+    const page: OrchestratorMcpThreadListResult = yield* tools.call(
+      "t3_thread_list",
+      {
+        projectId: thread.projectId,
+        includeSubagents: true,
+        statuses: ACTIVE_RUN_STATUSES,
+        limit: 100,
+        cursor,
+      },
+      OrchestratorMcpThreadListResult,
+    );
+    for (const child of page.threads) {
+      if (child.parentThreadId !== threadId || child.relationshipToParent !== "subagent") continue;
+      activeChildren.push({
+        threadId: child.threadId,
+        title: child.title,
+        status: child.status,
+        latestRunId: child.latestRunId,
+        providerInstanceId: child.providerInstanceId,
+        model: child.model,
+      });
+    }
+    cursor = page.nextCursor;
+  }
+  const latestRunStatus =
+    thread.latestRunStatus ??
+    recentRuns.find((run) => run.runId === thread.latestRunId)?.status ??
+    (thread.latestRunId !== null && thread.activeRunId === null ? thread.status : null);
+  const pendingRequests = thread.pendingRequests ?? [];
+  const usageLimit = thread.usageLimit ?? null;
+  const pendingBackgroundTasks = thread.pendingBackgroundTasks ?? [];
+  return {
+    threadId: thread.threadId,
+    title: thread.title,
+    status: thread.status,
+    healthClass: threadHealthClass({
+      status: thread.status,
+      latestRunStatus,
+      activeChildren,
+      pendingBackgroundTasks,
+      pendingRequestCount: thread.pendingRequestCount,
+      pendingRequests,
+      usageLimit,
+    }),
+    activeRunId: thread.activeRunId,
+    latestRunId: thread.latestRunId,
+    latestRunStatus,
+    providerInstanceId: thread.providerInstanceId,
+    model: thread.model,
+    branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    pendingRequestCount: thread.pendingRequestCount,
+    pendingRequests,
+    blockedOnThreadWait: thread.blockedOnThreadWait ?? false,
+    pendingBackgroundTasks,
+    activeChildren,
+    usageLimit,
+  };
+});
+
+const threadStatusCommand = Command.make("status", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Show a thread's run state, waits, children and usage-limit hold without changing anything.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      yield* withThreadTools(
+        flags,
+        Effect.fn("cli.thread.status")(function* (tools) {
+          const status = yield* readThreadStatus(tools, threadId);
+          if (flags.json) {
+            return yield* printJson(status);
+          }
+          yield* Console.log(
+            [
+              status.threadId,
+              status.healthClass,
+              status.status,
+              `${status.providerInstanceId}/${status.model}`,
+            ].join("  "),
+          );
+          if (status.worktreePath !== null) {
+            yield* Console.log(`${status.branch ?? "(no branch)"}  ${status.worktreePath}`);
+          }
+          if (status.activeRunId !== null && status.activeRunId !== status.latestRunId) {
+            yield* Console.log(`Active run ${status.activeRunId}`);
+          }
+          if (status.latestRunId !== null) {
+            yield* Console.log(`Latest run ${status.latestRunId}: ${status.latestRunStatus}`);
+          }
+          if (status.pendingRequestCount > 0) {
+            yield* Console.log(`${status.pendingRequestCount} pending request(s).`);
+          }
+          if (status.usageLimit !== null) {
+            yield* Console.log(
+              `Usage limit on ${status.usageLimit.instanceId}; resets ${status.usageLimit.resetsAt ?? "at an unknown time"}.`,
+            );
+          }
+          if (status.blockedOnThreadWait) {
+            yield* Console.log("Blocked on a thread wait.");
+          }
+          if (status.pendingBackgroundTasks.length > 0) {
+            yield* Console.log(`${status.pendingBackgroundTasks.length} background task(s).`);
+          }
+          for (const child of status.activeChildren) {
+            yield* Console.log(`child ${child.threadId}  ${child.status}  ${child.title}`);
+          }
+        }),
+        "read-only",
       );
     }).pipe(reportThreadErrors),
   ),
 );
 
 export const threadCommand = Command.make("thread").pipe(
-  Command.withDescription("Start, message, and read threads on the running server."),
+  Command.withDescription("Manage threads on the running server."),
   Command.withSubcommands([
     threadListCommand,
     threadStartCommand,
     threadSendCommand,
     threadShowCommand,
+    threadArchiveCommand,
+    threadInterruptCommand,
+    threadStatusCommand,
   ]),
 );

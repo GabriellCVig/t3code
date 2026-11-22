@@ -1097,7 +1097,7 @@ export const layer = Layer.effect(
               mode: "queue",
               ...(threadMode === "fresh_session" ? { freshContext: true } : {}),
               createdBy: active.createdBy,
-              creationSource: active.creationSource,
+              creationSource: "scheduled",
             })
             .pipe(
               Effect.catchTags({
@@ -1135,7 +1135,7 @@ export const layer = Layer.effect(
                       attachments: [],
                     },
                     createdBy: active.createdBy,
-                    creationSource: active.creationSource,
+                    creationSource: "scheduled",
                   })
                   .pipe(
                     Effect.map((launched) => launched.threadId),

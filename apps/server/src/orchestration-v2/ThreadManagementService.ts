@@ -97,6 +97,8 @@ export function withCreationProvenance(
       } = command;
       return { ...rest, ...provenance };
     }
+    case "queued-run.edit":
+    case "runtime-request.respond":
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":

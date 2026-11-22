@@ -54,6 +54,10 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import {
+  turnSourceForCreationSource,
+  type OrchestrationV2CreationSource,
+} from "@t3tools/contracts";
 import { mcpAppFromToolItem } from "@t3tools/shared/toolOutput";
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
@@ -347,6 +351,76 @@ describe("ClaudeAdapterV2 native resume history", () => {
 });
 
 describe("ClaudeAdapterV2 runtime query policy", () => {
+  it("intersects worker tools with runtime and instance limits and preserves required approvals", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "worker-tool-limits",
+      resume: false,
+      cwd: "/workspace",
+      workerControls: { allowedTools: ["Read", "Edit", "Glob", "Bash"] },
+      tools: ["Read", "Glob", "Grep"],
+      permissionMode: "default",
+      settings: {
+        ...DEFAULT_CLAUDE_SETTINGS,
+        launchArgs: "--tools Read,Edit --allowedTools Bash --mcp-config extra.json",
+      },
+    });
+    assert.deepEqual(options.tools, ["Read"]);
+    assert.deepEqual(options.allowedTools, []);
+    assert.isUndefined(options.extraArgs?.tools);
+    assert.isUndefined(options.extraArgs?.allowedTools);
+    assert.isUndefined(options.extraArgs?.["mcp-config"]);
+  });
+
+  it("preserves runtime and instance restrictions when worker controls add disallowed tools", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "worker-restrictions",
+      cwd: "/workspace",
+      resume: false,
+      workerControls: { disallowedTools: ["Edit", "Write"], env: { GCV_OWNER: "runner" } },
+      disallowedTools: ["Bash", "Edit"],
+      settings: {
+        ...DEFAULT_CLAUDE_SETTINGS,
+        launchArgs: "--disallowedTools WebFetch --disallowed-tools WebSearch",
+      },
+    });
+    assert.deepEqual(options.disallowedTools, ["Bash", "Edit", "Write", "WebFetch", "WebSearch"]);
+    assert.isUndefined(options.extraArgs?.disallowedTools);
+    assert.isUndefined(options.extraArgs?.["disallowed-tools"]);
+    assert.equal(options.env?.PATH, process.env.PATH);
+    assert.equal(options.env?.GCV_OWNER, "runner");
+  });
+
+  it("exports the triggering message's authenticated turn source to hooks", () => {
+    const sourceFor = (creationSource: OrchestrationV2CreationSource) => {
+      const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        nativeThreadId: "native-turn-source",
+        resume: false,
+        cwd: "/workspace",
+        environment: { T3CODE_TURN_SOURCE: "human" },
+        sdkSettings: { env: { T3CODE_TURN_SOURCE: "human", OTHER: "keep" } },
+        toolSearchOverride: "true",
+        turnSource: turnSourceForCreationSource(creationSource),
+      });
+      const source = options.env?.T3CODE_TURN_SOURCE;
+      assert.isDefined(source);
+      assert.deepEqual(typeof options.settings === "object" && options.settings.env, {
+        OTHER: "keep",
+        ENABLE_TOOL_SEARCH: "true",
+        T3CODE_TURN_SOURCE: source,
+      });
+      return options.env?.T3CODE_TURN_SOURCE;
+    };
+    assert.deepStrictEqual(
+      (["web", "desktop", "mobile", "mcp", "cli", "scheduled", "provider", "server"] as const).map(
+        sourceFor,
+      ),
+      ["human", "human", "human", "agent", "cli", "scheduled", "system", "system"],
+    );
+  });
+
   it.each([
     "-- --thinking-display omitted",
     "--thinking-display summarized -- --thinking-display omitted",
@@ -3547,6 +3621,151 @@ const encodeProviderThreadJson = Schema.encodeEffect(providerThreadJson);
 const decodeProviderThreadJson = Schema.decodeUnknownEffect(providerThreadJson);
 
 describe("ClaudeAdapterV2 background wake turns", () => {
+  it.effect.each([
+    { allowedTools: ["Read", "Grep", "Glob"] },
+    { allowedTools: [], exposeT3Mcp: false },
+    { exposeT3Mcp: false },
+  ])("applies worker execution controls to the SDK query ($exposeT3Mcp)", (tools) =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({
+        environment: { PATH: "/bin" },
+        settings: {
+          ...DEFAULT_CLAUDE_SETTINGS,
+          launchArgs: "--agent fallback --max-turns 30 --disallowedTools WebFetch",
+        },
+      });
+      yield* (yield* McpProviderSessions.McpProviderSessions).set({
+        environmentId: EnvironmentId.make("worker"),
+        threadId: harness.threadId,
+        providerSessionId: "worker",
+        providerInstanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+        endpoint: "http://localhost/mcp",
+        authorizationHeader: "Bearer test",
+        browserToolsAvailable: true,
+      });
+      const input = makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("worker-controls"),
+        text: "Inspect",
+        attachments: [],
+      });
+      yield* harness.runtime.startTurn({
+        ...input,
+        appThread: {
+          ...input.appThread,
+          workerControls: {
+            agent: "reader",
+            maxTurns: 4,
+            disallowedTools: ["Edit"],
+            env: { GCV_OWNER: "runner", TMPDIR: "/tmp/worker" },
+            ...tools,
+          },
+        },
+      });
+      const options = harness.getOpenedOptions()!;
+      assert.equal(options.agent, "reader");
+      assert.equal(options.maxTurns, 4);
+      const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
+      assert.equal(logged.agent, "reader");
+      assert.equal(logged.maxTurns, 4);
+      assert.equal(logged.strictMcpConfig, tools.allowedTools ? true : undefined);
+      assert.deepEqual(options.disallowedTools, ["Edit", "WebFetch"]);
+      assert.isUndefined(options.extraArgs?.agent);
+      assert.isUndefined(options.extraArgs?.["max-turns"]);
+      assert.deepEqual(
+        options.tools,
+        tools.allowedTools ?? { type: "preset", preset: "claude_code" },
+      );
+      assert.deepEqual(options.allowedTools, tools.allowedTools);
+      assert.isUndefined(options.mcpServers);
+      assert.equal(options.strictMcpConfig, tools.allowedTools ? true : undefined);
+      assert.include(options.env, { GCV_OWNER: "runner", TMPDIR: "/tmp/worker", PATH: "/bin" });
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each([
+    { label: "without worker controls", env: undefined },
+    {
+      label: "with conflicting worker controls",
+      env: { GCV_OWNER: "runner", T3CODE_TURN_SOURCE: "untrusted" },
+    },
+  ])("applies authenticated turn provenance at spawn and on live updates $label", ({ env }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const turn = (
+          ordinal: number,
+          createdBy: "user" | "agent",
+          creationSource: OrchestrationV2CreationSource,
+        ) => {
+          const input = makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-turn-source:${ordinal}`),
+            text: `Request ${ordinal}`,
+            attachments: [],
+            providerTurnOrdinal: ordinal,
+            messageCreatedBy: createdBy,
+            messageCreationSource: creationSource,
+          });
+          return env === undefined
+            ? input
+            : { ...input, appThread: { ...input.appThread, workerControls: { env } } };
+        };
+        const settle = Effect.gen(function* () {
+          yield* harness.offerAndWait(turnOneResult);
+          yield* Queue.take(harness.terminalReceipts);
+        });
+        yield* harness.runtime.startTurn(turn(1, "user", "web"));
+        yield* settle;
+        const opened = harness.getOpenedOptions();
+        assert.equal(opened?.env?.T3CODE_TURN_SOURCE, "human");
+        const openedEnv = typeof opened?.settings === "object" ? opened.settings.env : undefined;
+        assert.equal(openedEnv?.T3CODE_TURN_SOURCE, "human");
+        if (env) {
+          assert.equal(opened?.env?.GCV_OWNER, env.GCV_OWNER);
+          assert.equal(openedEnv?.GCV_OWNER, env.GCV_OWNER);
+        }
+
+        yield* harness.runtime.startTurn(turn(2, "agent", "mcp"));
+        yield* settle;
+        yield* harness.runtime.startTurn(turn(3, "agent", "mcp"));
+        yield* settle;
+        yield* harness.runtime.startTurn(turn(4, "user", "mobile"));
+        yield* settle;
+        // One live process: only changes reach the flag layer.
+        assert.strictEqual(harness.getOpenedOptions(), opened);
+        assert.deepEqual(harness.liveSelectionChanges, [
+          { env: { ...openedEnv, T3CODE_TURN_SOURCE: "agent" } },
+          { env: { ...openedEnv, T3CODE_TURN_SOURCE: "human" } },
+        ]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+    ),
+  );
+
   const WAKE_NATIVE_SESSION = "native-thread-claude-wake";
   const WAKE_TASK_ID = "bdqirlcyw";
   const WAKE_TOOL_USE_ID = "toolu_01Rs6JNNf5SqHRxpq5DeJHrW";

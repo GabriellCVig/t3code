@@ -2920,6 +2920,8 @@ it.effect("queued-message commands read a long thread's history without walking 
     yield* observed(
       orchestrator.dispatch({
         type: "queued-run.edit",
+        createdBy: "user",
+        creationSource: "web",
         commandId: CommandId.make("edit:long-history-reads"),
         threadId,
         runId: queuedRun.id,

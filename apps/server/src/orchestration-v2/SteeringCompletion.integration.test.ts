@@ -949,6 +949,8 @@ it.effect.each(
         assert.equal(edited.steerWhenReadyRunId, run.id);
         yield* orchestrator.dispatch({
           type: "queued-run.edit",
+          createdBy: "user",
+          creationSource: "web",
           commandId: CommandId.make("edit-steer-to-compact"),
           threadId,
           runId: edited.id,
@@ -2460,6 +2462,8 @@ it.effect.each(["auto", "deferred", "promote-edited"] as const)(
             )!;
             yield* orchestrator.dispatch({
               type: "queued-run.edit",
+              createdBy: "user",
+              creationSource: "web",
               commandId: CommandId.make("edit"),
               threadId,
               runId: queued.id,
@@ -2755,6 +2759,8 @@ it.effect("checks an edited scheduled /goal against the thread's current provide
         const editError = yield* orchestrator
           .dispatch({
             type: "queued-run.edit",
+            createdBy: "user",
+            creationSource: "web",
             commandId: CommandId.make("edit"),
             threadId,
             runId: queuedRun.id,

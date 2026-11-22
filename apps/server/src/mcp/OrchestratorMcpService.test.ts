@@ -256,6 +256,44 @@ describe("OrchestratorMcpService", () => {
     }),
   );
 
+  it("reports a usage-limit hold with its reset time and limited instance", () => {
+    const shell = {
+      lastErrorClass: "usage_limit",
+      lastErrorCode: "usage_limit",
+      latestRunId: RunId.make("run:limited"),
+      usageLimitResetAt: "2026-11-22T06:00:00.000Z",
+      lastError: "Claude usage limit reached.",
+    } as const;
+    const runs = [
+      {
+        id: RunId.make("run:limited"),
+        ordinal: 1,
+        status: "failed",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent_claude2"),
+        completedAt: DateTime.makeUnsafe("2026-11-22T01:00:00Z"),
+      },
+      { id: RunId.make("run:held"), ordinal: 2, status: "queued", completedAt: null },
+    ] as unknown as ReadonlyArray<OrchestrationV2ThreadProjection["runs"][number]>;
+    assert.deepStrictEqual(OrchestratorMcpService.threadUsageLimit(shell, runs), {
+      rateLimited: true,
+      resetsAt: "2026-11-22T06:00:00.000Z",
+      instanceId: ProviderInstanceId.make("claudeAgent_claude2"),
+      detail: "Claude usage limit reached.",
+    });
+    const noReset = { ...shell, usageLimitResetAt: null };
+    assert.isTrue(OrchestratorMcpService.threadUsageLimit(noReset, runs)?.rateLimited);
+    assert.isNull(
+      OrchestratorMcpService.threadUsageLimit({ ...noReset, lastErrorCode: "api_error_429" }, runs),
+    );
+    assert.isTrue(
+      OrchestratorMcpService.threadUsageLimit({ ...shell, lastErrorCode: "api_error_429" }, runs)
+        ?.rateLimited,
+    );
+    assert.isNull(
+      OrchestratorMcpService.threadUsageLimit({ ...shell, lastErrorClass: "provider_error" }, runs),
+    );
+  });
+
   it.effect("reports a restart-cut child as working until its continuation settles", () =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-restart-parent");

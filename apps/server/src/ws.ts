@@ -1994,6 +1994,11 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
+      // Interactive clients can identify their surface. CLI and scheduler provenance
+      // comes from their own authenticated dispatch paths.
+      const clientCreationSource = (surface: string | undefined) =>
+        surface === "mobile" || surface === "desktop" ? surface : "web";
+
       const handlers = ServerWsRpcGroup.of({
         [WS_METHODS.issuesList]: (input) => issues.list(input),
         [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
@@ -2035,8 +2040,9 @@ export const layerWsRpc = (
                     : ThreadMessageIntake.dispatchCommand(
                         ThreadManagementService.withCreationProvenance(command, {
                           createdBy: "user",
-                          creationSource:
-                            "creationSource" in command ? command.creationSource : "web",
+                          creationSource: clientCreationSource(
+                            "creationSource" in command ? command.creationSource : undefined,
+                          ),
                         }),
                         {
                           managesProviders:
@@ -2230,6 +2236,9 @@ export const layerWsRpc = (
                           modelSelection: input.modelSelection,
                           runtimeMode: input.runtimeMode,
                           interactionMode: input.interactionMode,
+                          ...(input.workerControls === undefined
+                            ? {}
+                            : { workerControls: input.workerControls }),
                           workspaceStrategy: input.workspaceStrategy,
                           ...(input.initialMessage === undefined
                             ? {}
@@ -2246,7 +2255,7 @@ export const layerWsRpc = (
                                 },
                               }),
                           createdBy: "user",
-                          creationSource: input.creationSource ?? "web",
+                          creationSource: clientCreationSource(input.creationSource),
                         }),
                       ),
                       Effect.provide(intakeContext),

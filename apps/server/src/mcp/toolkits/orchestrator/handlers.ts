@@ -6,7 +6,7 @@ import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../../../peer/RemoteDelegation.ts";
-import { readCaller } from "../../threadAccess.ts";
+import { assertLiveCaller, readCaller } from "../../threadAccess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
@@ -27,11 +27,20 @@ const handlers = {
       return yield* service.delegateTask(scope, input);
     }),
   ),
-  task_status: McpToolAccess.actsAsCaller(({ taskId }) =>
+  task_status: McpToolAccess.readsAsCaller(({ taskId }) =>
     Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const context = yield* readCaller();
+      const { scope, caller } = context;
+      const interrupted =
+        caller?.status === "interrupted" &&
+        caller.activeRunId === null &&
+        caller.archivedAt === null &&
+        caller.providerInstanceId === scope.thread?.providerInstanceId;
+      if (!interrupted) yield* assertLiveCaller(context);
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.taskStatus(scope, taskId);
+      return yield* service.taskStatus(scope, taskId, {
+        acknowledgeTerminal: !interrupted && scope.client?.access !== "read-only",
+      });
     }),
   ),
   task_cancel: McpToolAccess.actsAsCaller((input) =>

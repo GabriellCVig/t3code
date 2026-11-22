@@ -1572,11 +1572,15 @@ function codexStdioMcpServerNames(mcpServers: unknown): ReadonlyArray<string> {
     .map(([name]) => name);
 }
 
+function usesCodexMillionTokenWindow(selection: ModelSelection | undefined): boolean {
+  return getModelSelectionStringOptionValue(selection, "contextWindow") === "1m";
+}
+
 function codexThreadRuntimeParams(input: {
   readonly threadId: ThreadId | null;
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly stdioMcpServers?: ReadonlyArray<string>;
-  readonly modelSelection?: { readonly model: string };
+  readonly modelSelection?: ModelSelection;
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }): {
   readonly cwd?: string;
@@ -1597,6 +1601,9 @@ function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...(usesCodexMillionTokenWindow(input.modelSelection)
+        ? { model_context_window: 1_000_000, model_auto_compact_token_limit: 900_000 }
+        : {}),
       // One app-server serves many threads, so the id goes in per-thread shell config, not its env.
       ...(input.threadId === null
         ? {}
@@ -2001,8 +2008,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     getCapabilities: Effect.fn("CodexAdapterV2.getCapabilities")(function () {
       return Effect.succeed(CodexProviderCapabilitiesV2);
     }),
-    planSelectionTransition: Effect.fn("CodexAdapterV2.planSelectionTransition")(function () {
-      return Effect.succeed(turnScopedSelectionTransition());
+    planSelectionTransition: Effect.fn("CodexAdapterV2.planSelectionTransition")(function (input) {
+      return Effect.succeed(
+        usesCodexMillionTokenWindow(input.current) !== usesCodexMillionTokenWindow(input.target)
+          ? { type: "restart_session" as const }
+          : turnScopedSelectionTransition(),
+      );
     }),
     openSession: Effect.fn("CodexAdapterV2.openSession")(
       function* (input) {

@@ -96,6 +96,7 @@ const RENEWABLE_SESSION_WINDOW = Duration.days(30);
 const PAIRING_LINK_SUBJECT = "one-time-token";
 
 export interface McpClientSession {
+  readonly creationSource: "cli" | "mcp";
   readonly sessionId: AuthSessionId;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
@@ -636,6 +637,7 @@ export class EnvironmentAuth extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<McpClientSession, ServerAuthCredentialError | ServerAuthInternalError>;
     readonly issueMcpClientSession: (input: {
+      readonly creationSource?: "cli";
       readonly label: string;
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
@@ -1621,6 +1623,7 @@ export const make = Effect.gen(function* () {
           const client = {
             sessionId: session.sessionId,
             label: session.client.label ?? "MCP client",
+            creationSource: session.creationSource ?? "mcp",
             access: session.scopes.includes(AuthOrchestrationOperateScope)
               ? (session.runtimeModeCeiling ?? "approval-required")
               : "read-only",
@@ -1641,6 +1644,7 @@ export const make = Effect.gen(function* () {
     sessions
       .issue({
         subject: MCP_CLIENT_SUBJECT,
+        ...(input.creationSource === undefined ? {} : { creationSource: input.creationSource }),
         method: "bearer-access-token",
         scopes: mcpClientScopes(input.access),
         ttl: MCP_CLIENT_SESSION_TTL,

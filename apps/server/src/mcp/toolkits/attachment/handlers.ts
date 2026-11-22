@@ -89,7 +89,7 @@ export const layer = McpToolAccess.toLayer(
         (input) => [input.threadId],
         (input) =>
           Effect.gen(function* () {
-            const { caller, projection } = yield* readThread(input.threadId, ["messages"]);
+            const { caller, projection, scope } = yield* readThread(input.threadId, ["messages"]);
             if (projection.thread.archivedAt !== null)
               return yield* new OrchestratorMcpFailure({
                 code: "invalid_request",
@@ -111,7 +111,7 @@ export const layer = McpToolAccess.toLayer(
               attachments,
               mode: "auto",
               createdBy: "agent",
-              creationSource: "mcp",
+              creationSource: scope.client?.creationSource ?? "mcp",
             }).pipe(
               Effect.mapError((error) =>
                 error._tag === "AttachmentClaimError"

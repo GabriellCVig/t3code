@@ -86,7 +86,7 @@ const modelSelection = { instanceId, model: "gpt-5.4" };
 
 type LaunchedWith = Pick<
   ThreadLaunch.ThreadLaunchInput,
-  "modelSelection" | "runtimeMode" | "interactionMode"
+  "modelSelection" | "runtimeMode" | "interactionMode" | "workerControls"
 >;
 
 /** The thread the box launches for the task, which the test finishes. */
@@ -540,6 +540,9 @@ const boxToolkitLayer = (thread: BoxThread) => {
                 modelSelection: input.modelSelection,
                 runtimeMode: input.runtimeMode,
                 interactionMode: input.interactionMode,
+                ...(input.workerControls === undefined
+                  ? {}
+                  : { workerControls: input.workerControls }),
               }),
             ),
             Effect.andThen(Effect.flatten(Ref.get(thread.afterLaunch))),
@@ -1324,8 +1327,13 @@ it.effect("a task naming another driver there never runs its model on the parent
           driverKind: "claudeAgent",
           model: "claude-sonnet-4-6",
         },
+        workerControls: { allowedTools: ["Read"], maxTurns: 2 },
       });
       expect(result.isError).toBe(false);
+      expect((yield* Ref.get(thread.launchedWith))?.workerControls).toEqual({
+        allowedTools: ["Read"],
+        maxTurns: 2,
+      });
       expect((yield* Ref.get(thread.launchedWith))?.modelSelection.instanceId).toBe(
         boxClaude.instanceId,
       );

@@ -39,6 +39,7 @@ import {
   type ComposerImageAttachment,
   type ComposerThreadTarget,
 } from "../../composerDraftStore";
+import { isElectron } from "../../env";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   awaitAttachmentUploads,
@@ -174,6 +175,7 @@ async function submitQueuedRunEdit(input: {
     const result = await input.editQueuedRun({
       environmentId,
       input: {
+        creationSource: isElectron ? "desktop" : "web",
         threadId: editing.threadId,
         runId: editing.runId,
         text: restoreAttachmentOnlyBootstrapPrompt(editText, uploads.length > 0),

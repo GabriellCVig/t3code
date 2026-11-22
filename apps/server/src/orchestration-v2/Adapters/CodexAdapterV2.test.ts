@@ -1228,10 +1228,14 @@ describe("CodexAdapterV2 session initialize", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
       });
       return {
-        ensureThread: (threadId: string) =>
+        adapter,
+        ensureThread: (
+          threadId: string,
+          modelSelection: ModelSelection = CODEX_TEST_MODEL_SELECTION,
+        ) =>
           runtime.ensureThread({
             threadId: ThreadId.make(threadId),
-            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            modelSelection,
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
           }),
         initializeRequests: () => initializeRequests,
@@ -1241,6 +1245,55 @@ describe("CodexAdapterV2 session initialize", () => {
 
   const replayPreamble = (nativeThreadId: string) =>
     codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt: "unused" });
+
+  it.effect.each(["default", "1m"])("starts a thread with the %s context window", (window) =>
+    Effect.gen(function* () {
+      const entries = replayPreamble("context-window").slice(0, 5);
+      entries[3] = {
+        type: "expect_outbound",
+        label: "thread/start",
+        frame: {
+          id: 2,
+          method: "thread/start",
+          params: {
+            config: {
+              ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+              ...(window === "1m"
+                ? { model_context_window: 1_000_000, model_auto_compact_token_limit: 900_000 }
+                : {}),
+            },
+          },
+        },
+      };
+      const session = yield* openReplaySession(
+        makeCodexReplayTranscript({ scenario: "context-window", entries }),
+      );
+      const target = {
+        ...CODEX_TEST_MODEL_SELECTION,
+        options: [
+          { id: "reasoningEffort", value: "max" },
+          { id: "contextWindow", value: window },
+        ],
+      };
+      const transition = yield* session.adapter.planSelectionTransition({
+        current: CODEX_TEST_MODEL_SELECTION,
+        target,
+        sessionCapabilities: yield* session.adapter.getCapabilities(),
+      });
+      assert.equal(transition.type, window === "1m" ? "restart_session" : "apply_on_next_turn");
+      yield* session.ensureThread("context-window", target);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
 
   it.effect("sends one initialize when two threads start on a fresh session at once", () =>
     Effect.gen(function* () {
@@ -5315,7 +5368,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   excludeTurns: true,
                   cwd: CODEX_TEST_RUNTIME_POLICY.cwd,
                   model: CODEX_TEST_MODEL_SELECTION.model,
-                  config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                  config: {
+                    ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+                    model_context_window: 1_000_000,
+                    model_auto_compact_token_limit: 900_000,
+                  },
                 },
               },
             },
@@ -5337,7 +5394,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const error = yield* Effect.flip(
         harness.runtime.resumeThread({
           providerThread: harness.providerThread,
-          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          modelSelection: {
+            ...CODEX_TEST_MODEL_SELECTION,
+            options: [{ id: "contextWindow", value: "1m" }],
+          },
           runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
         }),
       );

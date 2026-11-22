@@ -12,6 +12,49 @@ const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegat
 const decodeThreadWaitResult = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitResult);
 
 describe("orchestrator MCP contracts", () => {
+  it("accepts a delegated task in an existing worktree", () => {
+    const request = {
+      task: "Review the branch",
+      isolation: "existing_worktree",
+      worktreePath: "/repo/review",
+    };
+    expect(decodeDelegateTaskInput(request)).toEqual(request);
+  });
+
+  it("decodes Claude worker controls and rejects unknown environment keys", () => {
+    const workerControls = {
+      agent: "reader",
+      maxTurns: 4,
+      allowedTools: ["Read", "Grep", "Glob"],
+      disallowedTools: ["Edit"],
+      exposeT3Mcp: false,
+      env: { GCV_OWNER: "runner", TMPDIR: "/tmp/worker", CLAUDE_CODE_PROMPT_CACHE_TTL: "5m" },
+    };
+    expect(decodeDelegateTaskInput({ task: "Inspect", workerControls }).workerControls).toEqual(
+      workerControls,
+    );
+    for (const key of ["PATH", "LD_PRELOAD", "ANTHROPIC_API_KEY", "T3CODE_TURN_SOURCE"]) {
+      expect(() =>
+        decodeDelegateTaskInput({
+          task: "Inspect",
+          workerControls: { env: { ...workerControls.env, [key]: "invalid" } },
+        }),
+      ).toThrow(`Unsupported Claude worker environment key: ${key}`);
+    }
+    expect(() =>
+      decodeDelegateTaskInput({ task: "Inspect", workerControls: { maxTurns: 0 } }),
+    ).toThrow();
+  });
+
+  it.each([
+    { agent: "-reader" },
+    { allowedTools: ["default"] },
+    { allowedTools: ["mcp__t3__read"] },
+    { allowedTools: [], exposeT3Mcp: true },
+  ])("rejects invalid Claude worker controls %j", (workerControls) => {
+    expect(() => decodeDelegateTaskInput({ task: "Inspect", workerControls })).toThrow();
+  });
+
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",

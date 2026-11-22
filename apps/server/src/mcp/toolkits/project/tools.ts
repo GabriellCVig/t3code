@@ -1,6 +1,7 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
   clampedPositiveInt,
+  ClaudeWorkerControls,
   NonNegativeInt,
   ModelSelection,
   TrimmedNonEmptyString,
@@ -143,6 +144,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     title: TrimmedNonEmptyString,
     generateTitle: Schema.optional(Schema.Boolean),
     modelSelection: Schema.optional(ModelSelection),
+    workerControls: Schema.optional(ClaudeWorkerControls),
     runtimeMode: Schema.optional(RuntimeMode),
     interactionMode: Schema.optional(ProviderInteractionMode),
     workspaceStrategy: Schema.optional(

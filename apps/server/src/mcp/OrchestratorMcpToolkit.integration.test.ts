@@ -1,3 +1,5 @@
+import * as TaskFolders from "../workspace/TaskFolders.ts";
+import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as NodeURL from "node:url";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -15,6 +17,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderReplayTranscript,
   type ProviderOptionDescriptor,
   type ServerProvider,
   ThreadId,
@@ -32,7 +35,18 @@ import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/Cod
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ServerConfig from "../config.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -56,9 +70,10 @@ import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 
-const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
-  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+const layerGit = GitVcsDriver.layer.pipe(
+  Layer.provide(VcsProcess.layer),
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-delegate-worktree-" })),
+  Layer.provide(NodeServices.layer),
 );
 
 /** A task delegated here always has a local child thread. */
@@ -204,6 +219,202 @@ const layerUnusedScheduledTaskStub = Layer.succeed(
   }),
 );
 
+const replayLayer = Effect.fn("replayLayer")(function* (
+  cwd: string,
+  rawTranscript: ProviderReplayTranscript,
+) {
+  const transcript = yield* CodexOrchestratorReplayHarness.decodeTranscript(
+    materializeReplayTranscriptWorkspace(rawTranscript, cwd),
+  );
+  const layerOrchestrator = ProviderReplayHarness.layerProviderReplay(
+    {
+      name: "delegated-task-status/codex",
+      transcript,
+      commands: [],
+    },
+    CodexOrchestratorReplayHarness,
+  );
+  // SQL spans carry no bound parameters, so this records which thread each tool read.
+  const threadRecordReads: Array<{
+    readonly threadId: ThreadId;
+    readonly fields: ReadonlyArray<string>;
+  }> = [];
+  const layerOrchestration = Layer.merge(
+    layerOrchestrator,
+    Layer.effect(
+      ThreadManagementService.ThreadManagementService,
+      Effect.gen(function* () {
+        const service = yield* ThreadManagementService.ThreadManagementService;
+        return ThreadManagementService.ThreadManagementService.of({
+          ...service,
+          getThreadRecords: (threadId, fields, filter) =>
+            Effect.sync(() => threadRecordReads.push({ threadId, fields })).pipe(
+              Effect.andThen(service.getThreadRecords(threadId, fields, filter)),
+            ),
+        });
+      }),
+    ).pipe(
+      Layer.provide(
+        ThreadManagementService.layer.pipe(
+          Layer.provide(layerOrchestrator),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(
+            CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+          ),
+        ),
+      ),
+    ),
+  );
+  const layerProviderRegistry = ProviderRegistryMock.layer([
+    makeProviderSnapshot({
+      instanceId: codexInstanceId,
+      driver: ProviderDriverKind.make("codex"),
+      model: codexModel,
+    }),
+  ]);
+  const layerProject = Layer.mock(ProjectService.ProjectService)({
+    workspaceScanDirectory: Effect.succeed,
+    getById: () =>
+      Effect.succeedSome({
+        id: projectId,
+        title: "Replay project",
+        workspaceRoot: cwd,
+        defaultModelSelection: codexSelection,
+        scripts: [],
+        createdAt: "2026-06-20T00:00:00.000Z",
+        updatedAt: "2026-06-20T00:00:00.000Z",
+        deletedAt: null,
+      }),
+  });
+  const layerLaunch = ThreadLaunchService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        layerProject,
+        layerOrchestration,
+        layerProviderRegistry,
+        ServerSettings.layerTest(),
+        WorktreeSetupTracker.layer,
+        IdAllocator.layer,
+        CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+        Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: cwd }),
+        Layer.mock(GitWorkflow.GitWorkflowService)({}),
+        Layer.mock(TerminalManager.TerminalManager)({}),
+        Layer.mock(TextGeneration.TextGeneration)({}),
+        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
+          runForThread: () => Effect.succeed({ status: "no-script" }),
+        }),
+      ),
+    ),
+  );
+  const layer = Layer.merge(
+    McpHttpServer.layerOrchestratorToolkit,
+    McpHttpServer.layerThreadToolkit,
+  ).pipe(
+    Layer.provide(layerLaunch),
+    Layer.provide(Layer.mock(TaskFolders.TaskFolders)({})),
+    Layer.provide(Layer.mock(CheckpointStore.CheckpointStore)({})),
+    Layer.provide(layerGit),
+    Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+    Layer.provideMerge(layerOrchestration),
+    Layer.provide(
+      CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript).pipe(
+        Layer.provide(McpProviderSessions.layer),
+      ),
+    ),
+    Layer.provide(layerProviderRegistry),
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(layerUnusedScheduledTaskStub),
+    Layer.provide(layerProject),
+    Layer.provideMerge(
+      SecretRequests.layer.pipe(
+        Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+        Layer.provide(layerMemorySecretStore),
+        Layer.provide(layerOrchestration),
+      ),
+    ),
+    Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+    Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+    Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+    Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  );
+  return { layer, threadRecordReads };
+});
+
+const startReplayParent = Effect.fn("startReplayParent")(function* (cwd: string) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const server = yield* McpServer.McpServer;
+  const parentCreate = yield* orchestrator.dispatch({
+    type: "thread.create",
+    createdBy: "user",
+    creationSource: "web",
+    commandId: CommandId.make("command:mcp-replay-parent:create"),
+    threadId: parentThreadId,
+    projectId,
+    title: "MCP replay parent",
+    modelSelection: codexSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: cwd,
+  });
+  yield* orchestrator.dispatch({
+    type: "message.dispatch",
+    createdBy: "user",
+    creationSource: "web",
+    commandId: CommandId.make("command:mcp-replay-parent:start"),
+    threadId: parentThreadId,
+    messageId: MessageId.make("message:mcp-replay-parent:start"),
+    text: parentPrompt,
+    attachments: [],
+    modelSelection: codexSelection,
+    dispatchMode: { type: "start_immediately" },
+  });
+  yield* orchestrator
+    .streamStoredEventsFrom({
+      threadId: parentThreadId,
+      afterSequence: parentCreate.sequence,
+    })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "provider-turn.updated" &&
+          stored.event.payload.status === "running",
+      ),
+      Stream.runHead,
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.die("Parent provider turn did not start."),
+          onSome: () => Effect.void,
+        }),
+      ),
+    );
+
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment:mcp-replay"),
+    requestNamespace: "mcp-provider-session-replay-parent",
+    thread: {
+      threadId: parentThreadId,
+      providerSessionId: "mcp-provider-session-replay-parent",
+      providerInstanceId: codexInstanceId,
+    },
+    client: undefined,
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  };
+  const invoke = (name: string, args: Record<string, unknown>, scope = invocation) =>
+    server
+      .callTool({ name, arguments: args })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+
+  return { orchestrator, invocation, invoke };
+});
+
 describe("orchestrator MCP toolkit", () => {
   it.live.each([
     { label: "distinct", result: queuedFollowupResult, latestSummary: queuedFollowupResult },
@@ -214,153 +425,9 @@ describe("orchestrator MCP toolkit", () => {
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace("delegated-task-status");
       const rawTranscript = yield* readDelegatedTaskStatusTranscript(result);
-      const transcript = yield* CodexOrchestratorReplayHarness.decodeTranscript(
-        materializeReplayTranscriptWorkspace(rawTranscript, cwd),
-      );
-      const layerOrchestrator = ProviderReplayHarness.layerProviderReplay(
-        {
-          name: "delegated-task-status/codex",
-          transcript,
-          commands: [],
-          runtimePolicyOverride: { cwd },
-        },
-        CodexOrchestratorReplayHarness,
-      );
-      // SQL spans carry no bound parameters, so this records which thread each tool read.
-      const threadRecordReads: Array<{
-        readonly threadId: ThreadId;
-        readonly fields: ReadonlyArray<string>;
-      }> = [];
-      const layerOrchestration = Layer.merge(
-        layerOrchestrator,
-        Layer.effect(
-          ThreadManagementService.ThreadManagementService,
-          Effect.gen(function* () {
-            const service = yield* ThreadManagementService.ThreadManagementService;
-            return ThreadManagementService.ThreadManagementService.of({
-              ...service,
-              getThreadRecords: (threadId, fields, filter) =>
-                Effect.sync(() => threadRecordReads.push({ threadId, fields })).pipe(
-                  Effect.andThen(service.getThreadRecords(threadId, fields, filter)),
-                ),
-            });
-          }),
-        ).pipe(
-          Layer.provide(
-            ThreadManagementService.layer.pipe(
-              Layer.provide(layerOrchestrator),
-              Layer.provide(ServerSettings.layerTest()),
-              Layer.provide(
-                CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
-              ),
-            ),
-          ),
-        ),
-      );
-      const layerProviderRegistry = ProviderRegistryMock.layer([
-        makeProviderSnapshot({
-          instanceId: codexInstanceId,
-          driver: ProviderDriverKind.make("codex"),
-          model: codexModel,
-        }),
-      ]);
-      const layerTest = layerOrchestratorToolkit.pipe(
-        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provideMerge(layerOrchestration),
-        Layer.provide(
-          CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript).pipe(
-            Layer.provide(McpProviderSessions.layer),
-          ),
-        ),
-        Layer.provide(layerProviderRegistry),
-        Layer.provide(ServerSettings.layerTest()),
-        Layer.provide(layerUnusedScheduledTaskStub),
-        Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-        Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-        Layer.provide(
-          Layer.mock(ProjectService.ProjectService)({ workspaceScanDirectory: Effect.succeed }),
-        ),
-        Layer.provideMerge(
-          SecretRequests.layer.pipe(
-            Layer.provide(layerMemorySecretStore),
-            Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
-            Layer.provide(layerOrchestration),
-          ),
-        ),
-        Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-      );
-
+      const { layer: layerTest, threadRecordReads } = yield* replayLayer(cwd, rawTranscript);
       yield* Effect.gen(function* () {
-        const orchestrator = yield* Orchestrator.OrchestratorV2;
-        const server = yield* McpServer.McpServer;
-        const parentCreate = yield* orchestrator.dispatch({
-          type: "thread.create",
-          createdBy: "user",
-          creationSource: "web",
-          commandId: CommandId.make("command:mcp-replay-parent:create"),
-          threadId: parentThreadId,
-          projectId,
-          title: "MCP replay parent",
-          modelSelection: codexSelection,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: cwd,
-        });
-        yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          createdBy: "user",
-          creationSource: "web",
-          commandId: CommandId.make("command:mcp-replay-parent:start"),
-          threadId: parentThreadId,
-          messageId: MessageId.make("message:mcp-replay-parent:start"),
-          text: parentPrompt,
-          attachments: [],
-          modelSelection: codexSelection,
-          dispatchMode: { type: "start_immediately" },
-        });
-        yield* orchestrator
-          .streamStoredEventsFrom({
-            threadId: parentThreadId,
-            afterSequence: parentCreate.sequence,
-          })
-          .pipe(
-            Stream.filter(
-              (stored) =>
-                stored.event.type === "provider-turn.updated" &&
-                stored.event.payload.status === "running",
-            ),
-            Stream.runHead,
-            Effect.flatMap(
-              Option.match({
-                onNone: () => Effect.die("Parent provider turn did not start."),
-                onSome: () => Effect.void,
-              }),
-            ),
-          );
-
-        const invocation: McpInvocationContext.McpInvocationScope = {
-          environmentId: EnvironmentId.make("environment:mcp-replay"),
-          requestNamespace: "mcp-provider-session-replay-parent",
-          thread: {
-            threadId: parentThreadId,
-            providerSessionId: "mcp-provider-session-replay-parent",
-            providerInstanceId: codexInstanceId,
-          },
-          client: undefined,
-          capabilities: new Set(["orchestration"]),
-          issuedAt: 1,
-        };
-        const invoke = (name: string, args: Record<string, unknown>, scope = invocation) =>
-          server
-            .callTool({ name, arguments: args })
-            .pipe(
-              Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
-              Effect.provideService(McpSchema.McpServerClient, client),
-            );
-
+        const { orchestrator, invocation, invoke } = yield* startReplayParent(cwd);
         const delegationStartSequence = yield* orchestrator.getThreadEventSequence(parentThreadId);
         const delegatedCall = yield* invoke("delegate_task", {
           task: delegatedPrompt,
@@ -605,6 +672,26 @@ describe("orchestrator MCP toolkit", () => {
           finishedParent.subagents.find((task) => task.id === followupTasks[1]!.id)
             ?.completionDelivery?.state,
         ).toBe("claimed");
+        const passive = {
+          ...invocation,
+          thread: undefined,
+          client: {
+            sessionId: "cli",
+            label: "t3 thread cli",
+            access: "read-only" as const,
+            creationSource: "cli" as const,
+          },
+        };
+        for (const [name, args] of [
+          ["t3_thread_read", { threadId: delegated.childThreadId, limit: 100 }],
+          ["t3_thread_list", { projectId, includeSubagents: true }],
+        ] as const) {
+          const result = yield* invoke(name, args, passive);
+          expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+        }
+        expect((yield* orchestrator.getThreadProjection(parentThreadId)).subagents).toEqual(
+          finishedParent.subagents,
+        );
         const finalStatusCall = yield* invoke("task_status", {
           taskId: delegated.taskId,
         });
@@ -810,6 +897,200 @@ describe("orchestrator MCP toolkit", () => {
             .map(({ threadId }) => threadId),
         ).toEqual([delegated.childThreadId]);
       }).pipe(Effect.provide(layerTest));
+    }),
+  );
+  it.live("reads a child result delivered after the parent was interrupted", () =>
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("late-child-result");
+      const raw = yield* readDelegatedTaskStatusTranscript(queuedFollowupResult);
+      // Hold the child response in the provider replay until it receives the parent interrupt.
+      const start = raw.entries.findIndex((entry) => entry.label === "child.original.item/started");
+      const end = raw.entries.findIndex((entry) => entry.label === "child.original.turn/completed");
+      expect(start).toBeGreaterThan(0);
+      expect(end).toBeGreaterThan(start);
+      const providerThread = "019f1000-0000-7000-8000-000000000001";
+      const providerTurn = "019f1000-0000-7000-8000-000000000002";
+      const { layer } = yield* replayLayer(cwd, {
+        ...raw,
+        entries: [
+          ...raw.entries.slice(0, start),
+          {
+            type: "expect_outbound",
+            label: "parent.turn/interrupt",
+            frame: {
+              id: 12,
+              method: "turn/interrupt",
+              params: { threadId: providerThread, turnId: providerTurn },
+            },
+          },
+          { type: "emit_inbound", label: "parent.turn/interrupt", frame: { id: 12, result: {} } },
+          {
+            type: "emit_inbound",
+            label: "parent.turn/completed",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: providerThread,
+                turn: {
+                  id: providerTurn,
+                  items: [],
+                  status: "interrupted",
+                  error: null,
+                  startedAt: 1776739467,
+                  completedAt: 1776739469,
+                  durationMs: 2000,
+                },
+              },
+            },
+          },
+          ...raw.entries.slice(start, end + 1),
+          { type: "runtime_exit", status: "success" },
+        ],
+      });
+      yield* Effect.gen(function* () {
+        const { orchestrator, invoke } = yield* startReplayParent(cwd);
+        const worktreePath = cwd;
+        const rejected = yield* invoke("delegate_task", {
+          task: delegatedPrompt,
+          workerControls: { maxTurns: 2 },
+        });
+        expect(rejected.isError).toBe(true);
+        const content = rejected.content[0];
+        expect(content?.type === "text" && JSON.parse(content.text)).toMatchObject({
+          code: "invalid_request",
+          message: "Worker controls require a Claude provider.",
+        });
+        for (const invalid of [
+          { isolation: "existing_worktree" },
+          { isolation: "shared", worktreePath },
+          { isolation: "worktree", worktreePath },
+          { worktreePath },
+          { isolation: "existing_worktree", worktreePath: `${cwd}/.git` },
+        ]) {
+          const rejected = yield* invoke("delegate_task", {
+            task: delegatedPrompt,
+            ...invalid,
+          });
+          expect(rejected.isError).toBe(true);
+          const part = rejected.content[0];
+          expect(part?.type === "text" && JSON.parse(part.text)).toMatchObject({
+            code: "invalid_request",
+          });
+        }
+        expect((yield* orchestrator.getThreadProjection(parentThreadId)).subagents).toHaveLength(0);
+        const request = {
+          clientRequestId: "late-child",
+          isolation: "existing_worktree",
+          worktreePath,
+          task: delegatedPrompt,
+          target: { providerInstanceId: codexInstanceId, model: codexModel },
+          mode: "async",
+        };
+        const start = yield* invoke("delegate_task", request);
+        const task = yield* decodeDelegateTaskResult(start.structuredContent);
+        yield* orchestrator
+          .streamStoredEventsFrom({ threadId: localChild(task.childThreadId), afterSequence: 0 })
+          .pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "provider-turn.updated" && event.payload.status === "running",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+          );
+        const child = yield* orchestrator.getThreadProjection(localChild(task.childThreadId));
+        expect(child.thread.worktreePath).toBe(worktreePath);
+        const retry = yield* invoke("delegate_task", request);
+        expect(retry.structuredContent).toMatchObject({
+          taskId: task.taskId,
+          childThreadId: task.childThreadId,
+        });
+        const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+        expect(parent.subagents.find((row) => row.id === task.taskId)?.result).toBeNull();
+        const interrupted = yield* orchestrator.dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make("interrupt-before-child-result"),
+          threadId: parentThreadId,
+          runId: parent.runs[0]!.id,
+        });
+        yield* orchestrator
+          .streamStoredEventsFrom({ threadId: parentThreadId, afterSequence: interrupted.sequence })
+          .pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "subagent.updated" &&
+                event.payload.id === task.taskId &&
+                event.payload.status === "completed",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+          );
+        const beforeRead = yield* orchestrator.getThreadProjection(parentThreadId);
+        const status = yield* invoke("task_status", { taskId: task.taskId });
+        expect(status.isError, JSON.stringify(status.content)).not.toBe(true);
+        const result = yield* decodeDelegateTaskResult(status.structuredContent);
+        const finished = yield* orchestrator.getThreadProjection(parentThreadId);
+        expect(finished.runs[0]?.status).toBe("interrupted");
+        expect(finished.subagents).toEqual(beforeRead.subagents);
+        const transfer = finished.contextTransfers.find(
+          (t) => t.type === "subagent_result" && t.sourcePoint.runId === task.childRunId,
+        );
+        expect(transfer).toBeDefined();
+        expect(result).toMatchObject({
+          status: "completed",
+          summary: delegatedResult,
+          resultContextTransferId: transfer!.id,
+        });
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.live("enforces edit attribution on agent and human queue entries", () =>
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("queue-attribution");
+      const { layer } = yield* replayLayer(
+        cwd,
+        yield* readDelegatedTaskStatusTranscript(queuedFollowupResult),
+      );
+      yield* Effect.gen(function* () {
+        const { orchestrator, invoke } = yield* startReplayParent(cwd);
+        for (const human of [true, false]) {
+          const messageId = MessageId.make(human ? "user-queue" : "agent-queue");
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(messageId),
+            threadId: parentThreadId,
+            messageId,
+            text: "Original",
+            createdBy: human ? "user" : "system",
+            creationSource: human ? "desktop" : "server",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+          });
+          const before = yield* orchestrator.getThreadProjection(parentThreadId);
+          const queued = before.runs.find((run) => run.userMessageId === messageId)!;
+          const edit = yield* invoke("t3_queue", {
+            action: "edit",
+            threadId: parentThreadId,
+            queuedRunId: queued.id,
+            text: "Revised",
+          });
+          const after = yield* orchestrator.getThreadProjection(parentThreadId);
+          const message = after.messages.find((row) => row.id === messageId);
+          if (human) {
+            expect(edit.isError).toBe(true);
+            expect(edit.content[0]).toMatchObject({ text: expect.stringContaining("human") });
+            expect(message).toEqual(before.messages.find((row) => row.id === messageId));
+          } else {
+            expect(edit.isError).not.toBe(true);
+            expect(message).toMatchObject({
+              text: "Revised",
+              createdBy: "agent",
+              creationSource: "mcp",
+            });
+          }
+        }
+      }).pipe(Effect.provide(layer));
     }),
   );
 });

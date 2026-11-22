@@ -821,6 +821,8 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
         });
         yield* orchestrator.dispatch({
           type: "queued-run.edit",
+          createdBy: "user",
+          creationSource: "web",
           commandId: CommandId.make(`${key}:edit`),
           threadId,
           runId: queuedRunId,
@@ -11210,6 +11212,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         if (started) {
           yield* orchestrator.dispatch({
             type: "queued-run.edit",
+            createdBy: "user",
+            creationSource: "web",
             commandId: CommandId.make(`${threadId}:edit`),
             threadId,
             runId: second.id,
@@ -11673,6 +11677,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
       yield* orchestrator.dispatch({
         type: "queued-run.edit",
+        createdBy: "user",
+        creationSource: "web",
         commandId: CommandId.make("runtime-layer-queued-edit-edit"),
         threadId,
         runId: queuedRun.id,
@@ -11691,6 +11697,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
       yield* orchestrator.dispatch({
         type: "queued-run.edit",
+        createdBy: "user",
+        creationSource: "web",
         commandId: CommandId.make("runtime-layer-queued-edit-attachments"),
         threadId,
         runId: queuedRun.id,
@@ -11699,6 +11707,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       yield* orchestrator.dispatch({
         type: "queued-run.edit",
+        createdBy: "user",
+        creationSource: "web",
         commandId: CommandId.make("runtime-layer-queued-edit-drop-attachments"),
         threadId,
         runId: queuedRun.id,
@@ -11726,6 +11736,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
       yield* orchestrator.dispatch({
         type: "queued-run.edit",
+        createdBy: "user",
+        creationSource: "web",
         commandId: CommandId.make("runtime-layer-queued-edit-text-only"),
         threadId,
         runId: queuedRun.id,
@@ -11744,6 +11756,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const emptyEditError = yield* orchestrator
         .dispatch({
           type: "queued-run.edit",
+          createdBy: "user",
+          creationSource: "web",
           commandId: CommandId.make("runtime-layer-queued-edit-empty"),
           threadId,
           runId: queuedRun.id,
@@ -12006,6 +12020,8 @@ it.layer(layerSharedApplicationDataPlaneTest)("run output after a stop", (it) =>
       const edit = (key: string, text: string) =>
         orchestrator.dispatch({
           type: "queued-run.edit",
+          createdBy: "user",
+          creationSource: "web",
           commandId: CommandId.make(`runtime-layer-command-output-edit-${key}`),
           threadId,
           runId: queued.id,
